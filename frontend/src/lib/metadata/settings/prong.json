@@ -1,0 +1,15 @@
+{
+  "id": "4_prong",
+  "name": "Four-Prong Crown Seat",
+  "anchor": {
+    "x": 0.50,
+    "y": 0.50
+  },
+  "recommendedScale": 0.82,
+  "rotation": 0,
+  "supportedCuts": [
+    "round",
+    "princess",
+    "marquise"
+  ]
+}

@@ -1,0 +1,14 @@
+{
+  "id": "bezel",
+  "name": "Bezel Wrap",
+  "anchor": {
+    "x": 0.50,
+    "y": 0.50
+  },
+  "recommendedScale": 0.78,
+  "rotation": 0,
+  "supportedCuts": [
+    "round",
+    "princess"
+  ]
+}

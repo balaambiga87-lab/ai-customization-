@@ -1,0 +1,14 @@
+{
+  "name": "caratline-workspace",
+  "version": "1.0.0",
+  "private": true,
+  "scripts": {
+    "dev:frontend": "npm run dev --prefix frontend",
+    "dev:backend": "npm run start:dev --prefix backend",
+    "dev": "npx -y concurrently -n \"frontend,backend\" -c \"cyan,magenta\" \"npm run dev:frontend\" \"npm run dev:backend\"",
+    "build:frontend": "npm run build --prefix frontend",
+    "build:backend": "npm run build --prefix backend",
+    "build": "npx -y concurrently -n \"frontend,backend\" -c \"cyan,magenta\" \"npm run build:frontend\" \"npm run build:backend\"",
+    "install:all": "npm install --prefix frontend && npm install --prefix backend"
+  }
+}

@@ -1,0 +1,525 @@
+/// Database connector settings targeting PostgreSQL.
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+/// Prisma Client generator configurations.
+generator client {
+  provider = "prisma-client-js"
+}
+
+/// User authorization roles defining platform permissions.
+enum Role {
+  USER
+  ADMIN
+  DESIGNER
+}
+
+/// Order status workflow lifecycles.
+enum OrderStatus {
+  PENDING
+  CONFIRMED
+  MANUFACTURING
+  SHIPPED
+  DELIVERED
+  CANCELLED
+}
+
+/// Payment processing status flags.
+enum PaymentStatus {
+  PENDING
+  SUCCESSFUL
+  FAILED
+  REFUNDED
+}
+
+/// Design lifecycle status.
+enum DesignStatus {
+  DRAFT
+  COMPLETED
+  ARCHIVED
+}
+
+/// Represents users in the system (customers, admins, designers). Soft delete supported.
+model User {
+  id               String             @id @default(uuid()) @db.Uuid
+  email            String             @unique
+  password         String
+  name             String?
+  role             Role               @default(USER)
+  createdAt        DateTime           @default(now()) @map("created_at")
+  updatedAt        DateTime           @updatedAt @map("updated_at")
+  deletedAt        DateTime?          @map("deleted_at")
+  refreshTokens    RefreshToken[]
+  savedDesigns     SavedDesign[]
+  promptHistories  PromptHistory[]
+  recommendations  AIRecommendation[]
+  carts            Cart[]
+  orders           Order[]
+  reviews          Review[]
+  auditLogs        AuditLog[]
+
+  @@map("users")
+}
+
+/// Manages active authentication sessions using refresh tokens.
+model RefreshToken {
+  id        String   @id @default(uuid()) @db.Uuid
+  token     String   @unique
+  userId    String   @map("user_id") @db.Uuid
+  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  expiresAt DateTime @map("expires_at")
+  isRevoked Boolean  @default(false) @map("is_revoked")
+  createdAt DateTime @default(now()) @map("created_at")
+
+  @@index([token])
+  @@index([userId])
+  @@map("refresh_tokens")
+}
+
+/// Hierarchical categorization for products (e.g., Rings, subcategory Engagement Rings).
+model Category {
+  id          String     @id @default(uuid()) @db.Uuid
+  name        String     @unique
+  slug        String     @unique
+  description String?
+  parentId    String?    @map("parent_id") @db.Uuid
+  parent      Category?  @relation("SubCategories", fields: [parentId], references: [id])
+  children    Category[] @relation("SubCategories")
+  products    Product[]
+  createdAt   DateTime   @default(now()) @map("created_at")
+  updatedAt   DateTime   @updatedAt @map("updated_at")
+  deletedAt   DateTime?  @map("deleted_at")
+
+  @@index([parentId])
+  @@map("categories")
+}
+
+/// Stores standard catalog inventory metadata. Supports active toggles.
+model Product {
+  id             String             @id @default(uuid()) @db.Uuid
+  categoryId     String             @map("category_id") @db.Uuid
+  category       Category           @relation(fields: [categoryId], references: [id])
+  name           String
+  slug           String             @unique
+  sku            String             @unique
+  description    String
+  basePrice      Decimal            @map("base_price") @db.Decimal(10, 2)
+  isCustomizable Boolean            @default(true) @map("is_customizable")
+  isActive       Boolean            @default(true) @map("is_active")
+  createdAt      DateTime           @default(now()) @map("created_at")
+  updatedAt      DateTime           @updatedAt @map("updated_at")
+  deletedAt      DateTime?          @map("deleted_at")
+  images         ProductImage[]
+  blueprints     Blueprint[]
+  cartItems      CartItem[]
+  orderItems     OrderItem[]
+  reviews        Review[]
+  recommendations AIRecommendation[]
+
+  @@index([categoryId])
+  @@index([slug])
+  @@index([sku])
+  @@map("products")
+}
+
+/// Standard static assets displaying inventory products.
+model ProductImage {
+  id        String   @id @default(uuid()) @db.Uuid
+  productId String   @map("product_id") @db.Uuid
+  product   Product  @relation(fields: [productId], references: [id], onDelete: Cascade)
+  url       String
+  altText   String?  @map("alt_text")
+  isPrimary Boolean  @default(false) @map("is_primary")
+  sortOrder Int      @default(0) @map("sort_order")
+  createdAt DateTime @default(now()) @map("created_at")
+
+  @@index([productId])
+  @@map("product_images")
+}
+
+/// Base metal types, purity scales, densities, and pricing factors.
+model Material {
+  id           String         @id @default(uuid()) @db.Uuid
+  name         String
+  sku          String         @unique
+  materialType String         @map("material_type") // e.g., "gold", "platinum"
+  purity       String         // e.g., "18k", "950"
+  pricePerGram Decimal        @map("price_per_gram") @db.Decimal(10, 2)
+  density      Float          // in g/cm3 for weight calculations
+  isActive     Boolean        @default(true) @map("is_active")
+  createdAt    DateTime       @default(now()) @map("created_at")
+  updatedAt    DateTime       @updatedAt @map("updated_at")
+  designObjects DesignObject[]
+
+  @@index([sku])
+  @@map("materials")
+}
+
+/// Gemstones catalog mapping shape, carat weight, color, clarity, and prices.
+model Gemstone {
+  id            String         @id @default(uuid()) @db.Uuid
+  name          String
+  sku           String         @unique
+  type          String         // e.g., "diamond", "emerald"
+  shape         String         // e.g., "round", "oval"
+  carat         Decimal        @db.Decimal(5, 2)
+  color         String?
+  clarity       String?
+  cut           String?
+  price         Decimal        @db.Decimal(10, 2)
+  isActive      Boolean        @default(true) @map("is_active")
+  createdAt     DateTime       @default(now()) @map("created_at")
+  updatedAt     DateTime       @updatedAt @map("updated_at")
+  designObjects DesignObject[]
+
+  @@index([sku])
+  @@map("gemstones")
+}
+
+/// Classifies customizable jewellery attachments (e.g., ring shanks, setting heads).
+model AssetCategory {
+  id              String            @id @default(uuid()) @db.Uuid
+  name            String            @unique
+  code            String            @unique // e.g., "SHANK", "PRONG", "HEAD"
+  description     String?
+  createdAt       DateTime          @default(now()) @map("created_at")
+  jewelleryAssets JewelleryAsset[]
+
+  @@map("asset_categories")
+}
+
+/// Modular 3D model files (glTF/USDZ) used to compose custom items on screen.
+model JewelleryAsset {
+  id              String         @id @default(uuid()) @db.Uuid
+  assetCategoryId String         @map("asset_category_id") @db.Uuid
+  category        AssetCategory  @relation(fields: [assetCategoryId], references: [id])
+  name            String
+  sku             String         @unique
+  modelUrl        String         @map("model_url") // 3D file path
+  thumbnailUrl    String?        @map("thumbnail_url")
+  metaData        Json           @map("metadata") // sizing offsets, material rules
+  priceModifier   Decimal        @map("price_modifier") @db.Decimal(10, 2)
+  priceMultiplier Float          @default(1.0) @map("price_multiplier")
+  isActive        Boolean        @default(true) @map("is_active")
+  createdAt       DateTime       @default(now()) @map("created_at")
+  updatedAt       DateTime       @updatedAt @map("updated_at")
+  deletedAt       DateTime?      @map("deleted_at")
+  designObjects   DesignObject[]
+
+  @@index([assetCategoryId])
+  @@index([sku])
+  @@map("jewellery_assets")
+}
+
+/// Skeletons of customizable items holding coord attachments (e.g. solitaire bands).
+model Blueprint {
+  id              String             @id @default(uuid()) @db.Uuid
+  productId       String?            @map("product_id") @db.Uuid
+  product         Product?           @relation(fields: [productId], references: [id], onDelete: SetNull)
+  name            String
+  modelUrl        String             @map("model_url")
+  thumbnailUrl    String?            @map("thumbnail_url")
+  basePrice       Decimal            @map("base_price") @db.Decimal(10, 2)
+  metadata        Json
+  isActive        Boolean            @default(true) @map("is_active")
+  createdAt       DateTime           @default(now()) @map("created_at")
+  updatedAt       DateTime           @updatedAt @map("updated_at")
+  deletedAt       DateTime?          @map("deleted_at")
+  anchors         BlueprintAnchor[]
+  savedDesigns    SavedDesign[]
+  recommendations AIRecommendation[]
+
+  @@index([productId])
+  @@map("blueprints")
+}
+
+/// 3D coordinate markers defining where gems/heads snap onto a base blueprint model.
+model BlueprintAnchor {
+  id                      String         @id @default(uuid()) @db.Uuid
+  blueprintId             String         @map("blueprint_id") @db.Uuid
+  blueprint               Blueprint      @relation(fields: [blueprintId], references: [id], onDelete: Cascade)
+  name                    String         // e.g., "center_gem_anchor"
+  anchorType              String         @map("anchor_type") // e.g., "GEM_SLOT", "ENGRAVING", "BAND_PART"
+  positionX               Float          @map("position_x")
+  positionY               Float          @map("position_y")
+  positionZ               Float          @map("position_z")
+  rotationX               Float          @default(0) @map("rotation_x")
+  rotationY               Float          @default(0) @map("rotation_y")
+  rotationZ               Float          @default(0) @map("rotation_z")
+  scaleX                  Float          @default(1) @map("scale_x")
+  scaleY                  Float          @default(1) @map("scale_y")
+  scaleZ                  Float          @default(1) @map("scale_z")
+  allowedAssetCategoryIds Json           @map("allowed_asset_category_ids") // Compatible AssetCategory lists
+  createdAt               DateTime       @default(now()) @map("created_at")
+  updatedAt               DateTime       @updatedAt @map("updated_at")
+  designObjects           DesignObject[]
+
+  @@index([blueprintId])
+  @@map("blueprint_anchors")
+}
+
+/// Stores customer-configured designs with serialized custom configuration snapshots.
+model SavedDesign {
+  id                  String               @id @default(uuid()) @db.Uuid
+  userId              String               @map("user_id") @db.Uuid
+  user                User                 @relation(fields: [userId], references: [id], onDelete: Cascade)
+  blueprintId         String               @map("blueprint_id") @db.Uuid
+  blueprint           Blueprint            @relation(fields: [blueprintId], references: [id])
+  name                String
+  title               String               @default("Untitled Design")
+  description         String?
+  thumbnailUrl        String?              @map("thumbnail_url")
+  status              DesignStatus         @default(DRAFT)
+  isFavorite          Boolean              @default(false) @map("is_favorite")
+  lastOpenedAt        DateTime             @default(now()) @map("last_opened_at")
+  configuration       Json                 // Serialized user choices (sizes, text, etc.)
+  totalPrice          Decimal              @map("total_price") @db.Decimal(10, 2)
+  previewUrl          String?              @map("preview_url")
+  isPublic            Boolean              @default(false) @map("is_public")
+  createdAt           DateTime             @default(now()) @map("created_at")
+  updatedAt           DateTime             @updatedAt @map("updated_at")
+  deletedAt           DateTime?            @map("deleted_at")
+  designObjects       DesignObject[]
+  cartItems           CartItem[]
+  orderItems          OrderItem[]
+  reviews             Review[]
+  aiGeneratedPreviews AIGeneratedPreview[]
+  versions            DesignVersion[]
+
+  @@index([userId])
+  @@index([blueprintId])
+  @@map("saved_designs")
+}
+
+model DesignVersion {
+  id               String      @id @default(uuid()) @db.Uuid
+  savedDesignId    String      @map("saved_design_id") @db.Uuid
+  savedDesign      SavedDesign @relation(fields: [savedDesignId], references: [id], onDelete: Cascade)
+  designJson       Json        @map("design_json")
+  priceSnapshot    Decimal     @map("price_snapshot") @db.Decimal(10, 2)
+  aiInterpretation Json?       @map("ai_interpretation")
+  previewUrl       String?     @map("preview_url")
+  versionNumber    Int         @map("version_number")
+  createdAt        DateTime    @default(now()) @map("created_at")
+
+  @@index([savedDesignId])
+  @@map("design_versions")
+}
+
+/// Bridges customizable assets and gemstones to specific anchors in a customer design.
+model DesignObject {
+  id                String          @id @default(uuid()) @db.Uuid
+  savedDesignId     String          @map("saved_design_id") @db.Uuid
+  savedDesign       SavedDesign     @relation(fields: [savedDesignId], references: [id], onDelete: Cascade)
+  blueprintAnchorId String          @map("blueprint_anchor_id") @db.Uuid
+  blueprintAnchor   BlueprintAnchor @relation(fields: [blueprintAnchorId], references: [id], onDelete: Cascade)
+  jewelleryAssetId  String?         @map("jewellery_asset_id") @db.Uuid
+  jewelleryAsset    JewelleryAsset? @relation(fields: [jewelleryAssetId], references: [id], onDelete: SetNull)
+  materialId        String?         @map("material_id") @db.Uuid
+  material          Material?       @relation(fields: [materialId], references: [id], onDelete: SetNull)
+  gemstoneId        String?         @map("gemstone_id") @db.Uuid
+  gemstone          Gemstone?       @relation(fields: [gemstoneId], references: [id], onDelete: SetNull)
+  customText        String?         @map("custom_text")
+  scaleFactor       Float           @default(1.0) @map("scale_factor")
+  priceCalculated   Decimal         @map("price_calculated") @db.Decimal(10, 2)
+  createdAt         DateTime        @default(now()) @map("created_at")
+
+  @@index([savedDesignId])
+  @@index([blueprintAnchorId])
+  @@index([jewelleryAssetId])
+  @@index([materialId])
+  @@index([gemstoneId])
+  @@map("design_objects")
+}
+
+/// Logs prompt parameters submitted to generative AI studios.
+model PromptHistory {
+  id                  String               @id @default(uuid()) @db.Uuid
+  userId              String?              @map("user_id") @db.Uuid
+  user                User?                @relation(fields: [userId], references: [id], onDelete: SetNull)
+  promptText          String               @map("prompt_text")
+  enhancedPromptText  String?              @map("enhanced_prompt_text")
+  negativePromptText  String?              @map("negative_prompt_text")
+  settings            Json
+  createdAt           DateTime             @default(now()) @map("created_at")
+  aiGeneratedPreviews AIGeneratedPreview[]
+
+  @@index([userId])
+  @@map("prompt_histories")
+}
+
+/// Stores generated output images of generative prompts, allowing conversion to saved designs.
+model AIGeneratedPreview {
+  id              String        @id @default(uuid()) @db.Uuid
+  promptHistoryId String        @map("prompt_history_id") @db.Uuid
+  promptHistory   PromptHistory @relation(fields: [promptHistoryId], references: [id], onDelete: Cascade)
+  imageUrl        String        @map("image_url")
+  depthMapUrl     String?       @map("depth_map_url") // Virtual try-on alignment data
+  isSaved         Boolean       @default(false) @map("is_saved")
+  savedDesignId   String?       @map("saved_design_id") @db.Uuid
+  savedDesign     SavedDesign?  @relation(fields: [savedDesignId], references: [id], onDelete: SetNull)
+  createdAt       DateTime      @default(now()) @map("created_at")
+
+  @@index([promptHistoryId])
+  @@index([savedDesignId])
+  @@map("ai_generated_previews")
+}
+
+/// Stores recommendations generated for customers mapping recommended items.
+model AIRecommendation {
+  id              String     @id @default(uuid()) @db.Uuid
+  userId          String?    @map("user_id") @db.Uuid
+  user            User?      @relation(fields: [userId], references: [id], onDelete: Cascade)
+  recommenderType String     @map("recommender_type") // e.g., "STYLE_QUIZ"
+  blueprintId     String?    @map("blueprint_id") @db.Uuid
+  blueprint       Blueprint? @relation(fields: [blueprintId], references: [id], onDelete: SetNull)
+  productId       String?    @map("product_id") @db.Uuid
+  product         Product?   @relation(fields: [productId], references: [id], onDelete: SetNull)
+  confidenceScore Float      @map("confidence_score")
+  reason          String?
+  aiSelectedAssets Json      @map("ai_selected_assets") // JSON array of assets recommended by AI
+  createdAt       DateTime   @default(now()) @map("created_at")
+
+  @@index([userId])
+  @@index([blueprintId])
+  @@index([productId])
+  @@map("ai_recommendations")
+}
+
+/// Manages customer active shopping cart records.
+model Cart {
+  id        String     @id @default(uuid()) @db.Uuid
+  userId    String?    @map("user_id") @db.Uuid
+  user      User?      @relation(fields: [userId], references: [id], onDelete: Cascade)
+  sessionId String?    @unique @map("session_id")
+  createdAt DateTime   @default(now()) @map("created_at")
+  updatedAt DateTime   @updatedAt @map("updated_at")
+  items     CartItem[]
+
+  @@index([userId])
+  @@map("carts")
+}
+
+/// Cart items matching either catalog products or customer personalized custom designs.
+model CartItem {
+  id            String       @id @default(uuid()) @db.Uuid
+  cartId        String       @map("cart_id") @db.Uuid
+  cart          Cart         @relation(fields: [cartId], references: [id], onDelete: Cascade)
+  productId     String?      @map("product_id") @db.Uuid
+  product       Product?     @relation(fields: [productId], references: [id], onDelete: SetNull)
+  savedDesignId String?      @map("saved_design_id") @db.Uuid
+  savedDesign   SavedDesign? @relation(fields: [savedDesignId], references: [id], onDelete: Cascade)
+  quantity      Int          @default(1)
+  createdAt     DateTime     @default(now()) @map("created_at")
+  updatedAt     DateTime     @updatedAt @map("updated_at")
+
+  @@index([cartId])
+  @@index([productId])
+  @@index([savedDesignId])
+  @@map("cart_items")
+}
+
+/// Ledger accounting record capturing orders placed. Restricts deletes on referenced users.
+model Order {
+  id              String       @id @default(uuid()) @db.Uuid
+  userId          String       @map("user_id") @db.Uuid
+  user            User         @relation(fields: [userId], references: [id], onDelete: Restrict)
+  orderNumber     String       @unique @map("order_number")
+  status          OrderStatus  @default(PENDING)
+  totalAmount     Decimal      @map("total_amount") @db.Decimal(10, 2)
+  taxAmount       Decimal      @map("tax_amount") @db.Decimal(10, 2)
+  shippingAmount  Decimal      @map("shipping_amount") @db.Decimal(10, 2)
+  shippingAddress Json         @map("shipping_address")
+  billingAddress  Json         @map("billing_address")
+  trackingNumber  String?      @map("tracking_number")
+  createdAt       DateTime     @default(now()) @map("created_at")
+  updatedAt       DateTime     @updatedAt @map("updated_at")
+  deletedAt       DateTime?    @map("deleted_at")
+  items           OrderItem[]
+  payments        Payment[]
+
+  @@index([userId])
+  @@index([orderNumber])
+  @@map("orders")
+}
+
+/// Historical snaps capturing quantities, prices, and design choices at checkout.
+model OrderItem {
+  id                    String       @id @default(uuid()) @db.Uuid
+  orderId               String       @map("order_id") @db.Uuid
+  order                 Order        @relation(fields: [orderId], references: [id], onDelete: Cascade)
+  productId             String?      @map("product_id") @db.Uuid
+  product               Product?     @relation(fields: [productId], references: [id], onDelete: SetNull)
+  savedDesignId         String?      @map("saved_design_id") @db.Uuid
+  savedDesign           SavedDesign? @relation(fields: [savedDesignId], references: [id], onDelete: SetNull)
+  price                 Decimal      @db.Decimal(10, 2)
+  quantity              Int          @default(1)
+  configurationSnapshot Json         @map("configuration_snapshot")
+  createdAt             DateTime     @default(now()) @map("created_at")
+
+  @@index([orderId])
+  @@index([productId])
+  @@index([savedDesignId])
+  @@map("order_items")
+}
+
+/// Financial transactions mapping order payments to gateway returns.
+model Payment {
+  id             String        @id @default(uuid()) @db.Uuid
+  orderId        String        @map("order_id") @db.Uuid
+  order          Order         @relation(fields: [orderId], references: [id], onDelete: Restrict)
+  paymentMethod  String        @map("payment_method")
+  transactionId  String        @unique @map("transaction_id")
+  amount         Decimal       @db.Decimal(10, 2)
+  status         PaymentStatus @default(PENDING)
+  paymentDetails Json?         @map("payment_details")
+  createdAt      DateTime      @default(now()) @map("created_at")
+  updatedAt      DateTime      @updatedAt @map("updated_at")
+
+  @@index([orderId])
+  @@index([transactionId])
+  @@map("payments")
+}
+
+/// User feedback and scoring for catalog products or custom designs.
+model Review {
+  id            String       @id @default(uuid()) @db.Uuid
+  userId        String       @map("user_id") @db.Uuid
+  user          User         @relation(fields: [userId], references: [id], onDelete: Cascade)
+  productId     String?      @map("product_id") @db.Uuid
+  product       Product?     @relation(fields: [productId], references: [id], onDelete: Cascade)
+  savedDesignId String?      @map("saved_design_id") @db.Uuid
+  savedDesign   SavedDesign? @relation(fields: [savedDesignId], references: [id], onDelete: Cascade)
+  rating        Int
+  title         String?
+  comment       String?
+  isApproved    Boolean      @default(false) @map("is_approved")
+  createdAt     DateTime     @default(now()) @map("created_at")
+  updatedAt     DateTime     @updatedAt @map("updated_at")
+
+  @@index([userId])
+  @@index([productId])
+  @@index([savedDesignId])
+  @@map("reviews")
+}
+
+/// Security logging table documenting dashboard operations.
+model AuditLog {
+  id          String   @id @default(uuid()) @db.Uuid
+  userId      String?  @map("user_id") @db.Uuid
+  user        User?    @relation(fields: [userId], references: [id], onDelete: SetNull)
+  action      String
+  entityName  String?  @map("entity_name")
+  entityId    String?  @map("entity_id") @db.Uuid
+  oldValues   Json?    @map("old_values")
+  newValues   Json?    @map("new_values")
+  ipAddress   String?  @map("ip_address")
+  userAgent   String?  @map("user_agent")
+  createdAt   DateTime @default(now()) @map("created_at")
+
+  @@index([userId])
+  @@index([action])
+  @@map("audit_logs")
+}
