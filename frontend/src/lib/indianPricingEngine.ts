@@ -7,6 +7,7 @@ export interface IndianPricingBreakdown {
   makingCharges: number;  // e.g. 3014 (12% of Gold Cost)
   gst: number;            // e.g. 5194 (3% of subtotal)
   total: number;          // e.g. 178328
+  grandTotal: number;     // e.g. 178328 (alias for total)
 }
 
 export const METAL_RATE_PER_GRAM: Record<string, number> = {
@@ -33,6 +34,7 @@ export const DIAMOND_CARAT_PRICE_MAP: Record<number, number> = {
  * Formats numbers into Indian currency format (e.g. ₹1,78,328)
  */
 export function formatINR(amount: number): string {
+  if (isNaN(amount) || amount === undefined || amount === null) return "₹0";
   return new Intl.NumberFormat("en-IN", {
     style: "currency",
     currency: "INR",
@@ -56,45 +58,32 @@ export function calculateIndianPricing(
       makingCharges: 0,
       gst: 0,
       total: 0,
+      grandTotal: 0,
     };
   }
 
-  const metalRate = METAL_RATE_PER_GRAM[metal] || 7850;
-  const goldCost = Math.round(goldWeightGrams * metalRate);
+  const rate = METAL_RATE_PER_GRAM[metal] || 7850;
+  const goldCost = Math.round(goldWeightGrams * rate);
 
+  // Approximate diamond pricing scale
   let diamondCost = 0;
   if (carat > 0) {
-    // Find nearest carat rate from lookup map
-    const caratKeys = Object.keys(DIAMOND_CARAT_PRICE_MAP).map(Number).sort((a, b) => a - b);
-    let closestCarat = 1.00;
-    let minDiff = Infinity;
-    for (const c of caratKeys) {
-      const diff = Math.abs(c - carat);
-      if (diff < minDiff) {
-        minDiff = diff;
-        closestCarat = c;
-      }
-    }
-    diamondCost = DIAMOND_CARAT_PRICE_MAP[closestCarat] || 145000;
+    const baseRate = carat >= 1.5 ? 260000 : carat >= 1.0 ? 145000 : carat >= 0.5 ? 42000 : 18000;
+    diamondCost = Math.round(carat * baseRate);
   }
 
-  // Making charges = 12% of Gold Value
   const makingCharges = Math.round(goldCost * 0.12);
-
-  // Subtotal before tax
   const subtotal = goldCost + diamondCost + makingCharges;
-
-  // GST = 3% of total value
-  const gst = Math.round(subtotal * 0.03);
-
-  const total = goldCost + diamondCost + makingCharges + gst;
+  const gst = Math.round(subtotal * 0.03); // 3% GST on jewellery in India
+  const total = subtotal + gst;
 
   return {
-    goldWeightGrams: Number(goldWeightGrams.toFixed(1)),
+    goldWeightGrams,
     goldCost,
     diamondCost,
     makingCharges,
     gst,
     total,
+    grandTotal: total,
   };
 }

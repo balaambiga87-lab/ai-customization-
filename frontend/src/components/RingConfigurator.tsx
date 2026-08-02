@@ -1,34 +1,31 @@
 "use client";
 
-import React, { useState, useRef, useMemo } from "react";
+import React, { useState, useRef, useMemo, useEffect, useCallback } from "react";
+import { Metal } from "@/lib/types";
 import {
-  Category,
-  ConfigState,
-  DragPayload,
-  Metal,
-  PartKey,
-  BandKey,
-  SettingKey,
-  StoneKey,
-  LayerObject,
-  DesignJSON,
-} from "@/lib/types";
-import { PART_LIBRARY, findPart, renderPartIcon } from "@/lib/partsLibrary";
-import "@/styles/ring-atelier.css";
+  JewelleryType,
+  CanvasLayer,
+  useLayerStore,
+} from "@/stores/useLayerStore";
+import {
+  JEWELLERY_TYPES,
+  CATEGORIES_BY_JEWELLERY_TYPE,
+  getAssetLibrary,
+  registerCustomAsset,
+  classifyUploadedAsset,
+  ComponentMeta,
+} from "@/lib/jewelryAssetLibrary";
+import { renderPartIcon, renderDiamondForCanvas } from "@/lib/partsLibrary";
+import { computeAiAutoAlign, AlignRecommendation } from "@/lib/aiAutoAlignEngine";
+import { AiAutoAlignModal } from "./AiAutoAlignModal";
 import { CadSetting } from "./CadSetting";
-import { AnchorEditor } from "./AnchorEditor";
 import { LuxuryPreviewModal } from "./LuxuryPreviewModal";
-import { getBandMetadata, saveBandAnchorMetadata } from "@/lib/assetMetadataLoader";
-import { checkCompatibility } from "@/lib/compatibilityEngine";
+import { calculateIndianPricing, formatINR } from "@/lib/indianPricingEngine";
+import "@/styles/ring-atelier.css";
 
-const CATEGORIES: Category[] = ["band", "setting", "stone", "accent"];
-const CATEGORY_LABEL: Record<Category, string> = {
-  band: "Ring Bands",
-  setting: "Settings",
-  stone: "Gemstones",
-  accent: "Side Stones",
-};
-
+// ─────────────────────────────────────────────────────────────────
+// CONSTANTS
+// ─────────────────────────────────────────────────────────────────
 const METAL_LABEL: Record<Metal, string> = {
   rose_gold: "Rose Gold",
   gold: "Yellow Gold",
@@ -36,613 +33,675 @@ const METAL_LABEL: Record<Metal, string> = {
   platinum: "Platinum",
 };
 
-const METAL_MULTIPLIER: Record<Metal, number> = {
-  silver: 1.0,
-  gold: 1.25,
-  rose_gold: 1.2,
-  platinum: 1.6,
-};
+// ─────────────────────────────────────────────────────────────────
+// DRAG STATE TYPES (stored in refs — avoid unnecessary re-renders)
+// ─────────────────────────────────────────────────────────────────
+interface SidebarDrag {
+  item: ComponentMeta;
+}
+interface LayerDrag {
+  layerId: string;
+  startX: number;
+  startY: number;
+  origX: number;
+  origY: number;
+}
+interface ResizeDrag {
+  layerId: string;
+  origScale: number;
+  startDist: number;
+  centerX: number;
+  centerY: number;
+}
+interface RotateDrag {
+  layerId: string;
+  origRotation: number;
+  startAngle: number;
+  centerX: number;
+  centerY: number;
+}
 
-const BASE_PRICES: Record<string, number> = {
-  classic: 450,
-  twist: 580,
-  pave: 720,
-  round: 850,
-  oval: 920,
-  princess: 780,
-  emerald: 950,
-  marquise: 680,
-  prong: 180,
-  bezel: 240,
-  halo: 380,
-  accent: 120,
-};
-
-import { calculateIndianPricing, formatINR } from "@/lib/indianPricingEngine";
-
+// ─────────────────────────────────────────────────────────────────
+// COMPONENT: Jewellery Customization Studio
+// ─────────────────────────────────────────────────────────────────
 export function RingConfigurator() {
+  // ── Zustand Layer Store & History ────────────────────────────
+  const {
+    layers,
+    selectedLayerId,
+    addLayer,
+    updateLayer,
+    selectLayer,
+    deleteLayer,
+    duplicateLayer,
+    bringForward,
+    sendBack,
+    bringToFront,
+    sendToBack,
+    clearLayers,
+    setLayers,
+    undo,
+    redo,
+    canUndo,
+    canRedo,
+  } = useLayerStore();
+
+  // ── Studio UI State ──────────────────────────────────────────
+  const [selectedJewelleryType, setSelectedJewelleryType] = useState<JewelleryType>("ring");
+  const [activeCategoryKey, setActiveCategoryKey] = useState<string>("ring_band");
   const [metal, setMetal] = useState<Metal>("rose_gold");
-  const [activeTab, setActiveTab] = useState<Category>("band");
   const [searchQuery, setSearchQuery] = useState<string>("");
-  const [config, setConfig] = useState<ConfigState>({ band: null, stone: null, setting: null, accents: {} });
-
-  // -------------------------------------------------------------
-  // EMPTY INITIAL CANVAS LAYER ENGINE STATE (Zero Presets)
-  // -------------------------------------------------------------
-  const [layers, setLayers] = useState<LayerObject[]>([]);
-  const [selectedLayerId, setSelectedLayerId] = useState<string | null>(null);
-
   const [zoomScale, setZoomScale] = useState<number>(1.0);
   const [showGrid, setShowGrid] = useState<boolean>(true);
   const [showGuideLines, setShowGuideLines] = useState<boolean>(false);
-  const [draggingLayerId, setDraggingLayerId] = useState<string | null>(null);
-
-  // DRAG OVERLAY & TRANSLUCENT PREVIEW CURSOR STATE
-  const [activeDragPayload, setActiveDragPayload] = useState<DragPayload | null>(null);
-  const [isCanvasDragOver, setIsCanvasDragOver] = useState<boolean>(false);
-  const [dragCursorPos, setDragCursorPos] = useState<{ x: number; y: number } | null>(null);
-
-  // Modals & Banners & Confirm Design State
-  const [anchorEditorOpen, setAnchorEditorOpen] = useState(false);
-  const [luxuryModalOpen, setLuxuryModalOpen] = useState(false);
-  const [isDesignConfirmed, setIsDesignConfirmed] = useState(false);
+  const [guideLines, setGuideLines] = useState({ h: false, v: false });
   const [aiStatusMessage, setAiStatusMessage] = useState<string | null>(null);
-  const [compatAlert, setCompatAlert] = useState<{ message: string; suggestedLabels: string[] } | null>(null);
 
-  const canvasInnerRef = useRef<HTMLDivElement>(null);
-  const fileInputRef = useRef<HTMLInputElement>(null);
+  // ── Modals State ─────────────────────────────────────────────
+  const [aiAlignRecommendation, setAiAlignRecommendation] = useState<AlignRecommendation | null>(null);
+  const [isAiModalOpen, setIsAiModalOpen] = useState<boolean>(false);
+  const [luxuryModalOpen, setLuxuryModalOpen] = useState<boolean>(false);
 
-  function handleConfirmDesign() {
-    if (layers.length === 0) {
-      alert("Canvas is empty. Drag ring components onto the canvas before confirming your design.");
-      return;
+  // ── Custom Asset Upload State ────────────────────────────────
+  const [uploadModalOpen, setUploadModalOpen] = useState<boolean>(false);
+  const [uploadName, setUploadName] = useState<string>("");
+  const [uploadMetaLabel, setUploadMetaLabel] = useState<string>("Custom Upload");
+  const [uploadImageUrl, setUploadImageUrl] = useState<string>("");
+  const [uploadCategory, setUploadCategory] = useState<string>("ring_band");
+
+  // ── Pointer Drag Feedback State ──────────────────────────────
+  const [previewPos, setPreviewPos] = useState<{ x: number; y: number } | null>(null);
+  const [previewItem, setPreviewItem] = useState<ComponentMeta | null>(null);
+  const [isOverCanvas, setIsOverCanvas] = useState(false);
+  const [draggingCardKey, setDraggingCardKey] = useState<string | null>(null);
+
+  // ── Refs ─────────────────────────────────────────────────────
+  const canvasTrayRef = useRef<HTMLDivElement>(null);
+  const rafRef = useRef<number>(0);
+
+  const sidebarDragRef = useRef<SidebarDrag | null>(null);
+  const layerDragRef = useRef<LayerDrag | null>(null);
+  const resizeDragRef = useRef<ResizeDrag | null>(null);
+  const rotateDragRef = useRef<RotateDrag | null>(null);
+
+  // ── Sync Active Category when Jewellery Type changes ──────────
+  useEffect(() => {
+    const categories = CATEGORIES_BY_JEWELLERY_TYPE[selectedJewelleryType];
+    if (categories && categories.length > 0) {
+      setActiveCategoryKey(categories[0].key);
     }
-    setIsDesignConfirmed(true);
-    setAiStatusMessage("✅ Finalized Design Confirmed! Ready for Luxury AI Studio Preview.");
-    setTimeout(() => setAiStatusMessage(null), 3000);
+  }, [selectedJewelleryType]);
+
+  // ── Filtered Assets ──────────────────────────────────────────
+  const assetLibrary = useMemo(() => getAssetLibrary(), [uploadModalOpen]);
+  const currentCategoryAssets = useMemo(() => {
+    return assetLibrary.filter(
+      (item) =>
+        item.jewelleryType === selectedJewelleryType &&
+        item.category === activeCategoryKey &&
+        (searchQuery === "" || item.name.toLowerCase().includes(searchQuery.toLowerCase()))
+    );
+  }, [assetLibrary, selectedJewelleryType, activeCategoryKey, searchQuery]);
+
+  // Selected Layer
+  const selectedLayer = useMemo(() => {
+    return layers.find((l) => l.id === selectedLayerId) || null;
+  }, [layers, selectedLayerId]);
+
+  // ── Helper: Canvas Rect ──────────────────────────────────────
+  const getCanvasRect = useCallback(() => {
+    return canvasTrayRef.current?.getBoundingClientRect() ?? null;
+  }, []);
+
+  // ── Create New Layer from Sidebar Drop ───────────────────────
+  const createLayerFromDrop = useCallback(
+    (item: ComponentMeta, clientX: number, clientY: number) => {
+      const rect = getCanvasRect();
+      if (!rect) return;
+
+      const rawX = ((clientX - rect.left) / rect.width) * 100;
+      const rawY = ((clientY - rect.top) / rect.height) * 100;
+
+      // Free placement: drop exactly where cursor is released
+      const dropX = Math.max(5, Math.min(95, rawX));
+      const dropY = Math.max(5, Math.min(95, rawY));
+
+      const newLayer: CanvasLayer = {
+        id: `${item.category}_${Date.now()}`,
+        jewelleryType: item.jewelleryType,
+        type: item.category,
+        category: item.category,
+        key: item.key,
+        name: item.name,
+        image: item.imageUrl,
+        x: Math.round(dropX * 10) / 10,
+        y: Math.round(dropY * 10) / 10,
+        scale: item.category.includes("band") || item.category.includes("chain") ? 1.0 : 0.9,
+        rotation: 0,
+        zIndex: layers.length + 1,
+        metal,
+      };
+
+      addLayer(newLayer);
+    },
+    [addLayer, getCanvasRect, layers.length, metal]
+  );
+
+  // ── Reset Pointer Drag Refs ───────────────────────────────────
+  const resetDrag = useCallback(() => {
+    sidebarDragRef.current = null;
+    layerDragRef.current = null;
+    resizeDragRef.current = null;
+    rotateDragRef.current = null;
+    setPreviewPos(null);
+    setPreviewItem(null);
+    setIsOverCanvas(false);
+    setDraggingCardKey(null);
+    setGuideLines({ h: false, v: false });
+  }, []);
+
+  // ── Global Pointer Event Listeners ───────────────────────────
+  useEffect(() => {
+    const onMove = (e: PointerEvent) => {
+      cancelAnimationFrame(rafRef.current);
+      rafRef.current = requestAnimationFrame(() => {
+        const rect = getCanvasRect();
+
+        // 1. Sidebar Card Dragging
+        if (sidebarDragRef.current) {
+          setPreviewPos({ x: e.clientX, y: e.clientY });
+          if (rect) {
+            const over =
+              e.clientX >= rect.left &&
+              e.clientX <= rect.right &&
+              e.clientY >= rect.top &&
+              e.clientY <= rect.bottom;
+            setIsOverCanvas(over);
+          }
+          return;
+        }
+
+        // 2. Canvas Layer Dragging (Free Canva/Figma movement)
+        if (layerDragRef.current && rect) {
+          const { layerId, startX, startY, origX, origY } = layerDragRef.current;
+          const deltaXPercent = ((e.clientX - startX) / rect.width) * 100;
+          const deltaYPercent = ((e.clientY - startY) / rect.height) * 100;
+
+          let newX = Math.max(2, Math.min(98, origX + deltaXPercent));
+          let newY = Math.max(2, Math.min(98, origY + deltaYPercent));
+
+          // Center guide lines check
+          const nearV = Math.abs(newX - 50) < 1.0;
+          const nearH = Math.abs(newY - 50) < 1.0;
+          setGuideLines({ h: nearH, v: nearV });
+
+          updateLayer(layerId, {
+            x: Math.round(newX * 10) / 10,
+            y: Math.round(newY * 10) / 10,
+          });
+          return;
+        }
+
+        // 3. Resize Handle Dragging
+        if (resizeDragRef.current) {
+          const { layerId, origScale, startDist, centerX, centerY } = resizeDragRef.current;
+          const dx = e.clientX - centerX;
+          const dy = e.clientY - centerY;
+          const currentDist = Math.sqrt(dx * dx + dy * dy);
+          const ratio = currentDist / startDist;
+          const newScale = Math.max(0.3, Math.min(3.0, Math.round(origScale * ratio * 100) / 100));
+          updateLayer(layerId, { scale: newScale });
+          return;
+        }
+
+        // 4. Rotation Handle Dragging
+        if (rotateDragRef.current) {
+          const { layerId, origRotation, startAngle, centerX, centerY } = rotateDragRef.current;
+          const currentAngle = Math.atan2(e.clientY - centerY, e.clientX - centerX) * (180 / Math.PI);
+          let delta = currentAngle - startAngle;
+          let newRot = Math.round(origRotation + delta);
+          newRot = ((newRot % 360) + 360) % 360;
+          updateLayer(layerId, { rotation: newRot });
+          return;
+        }
+      });
+    };
+
+    const onUp = (e: PointerEvent) => {
+      if (sidebarDragRef.current) {
+        const item = sidebarDragRef.current.item;
+        const rect = getCanvasRect();
+        if (
+          rect &&
+          e.clientX >= rect.left &&
+          e.clientX <= rect.right &&
+          e.clientY >= rect.top &&
+          e.clientY <= rect.bottom
+        ) {
+          createLayerFromDrop(item, e.clientX, e.clientY);
+        }
+      }
+      resetDrag();
+    };
+
+    document.addEventListener("pointermove", onMove, { passive: true });
+    document.addEventListener("pointerup", onUp);
+
+    return () => {
+      document.removeEventListener("pointermove", onMove);
+      document.removeEventListener("pointerup", onUp);
+      cancelAnimationFrame(rafRef.current);
+    };
+  }, [createLayerFromDrop, getCanvasRect, resetDrag, updateLayer]);
+
+  // ── Keyboard Shortcuts ────────────────────────────────────────
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      const target = e.target as HTMLElement;
+      if (target.tagName === "INPUT" || target.tagName === "TEXTAREA") return;
+
+      const id = useLayerStore.getState().selectedLayerId;
+
+      if (e.key === "Delete" || e.key === "Backspace") {
+        if (id) deleteLayer(id);
+      }
+      if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === "z") {
+        e.preventDefault();
+        if (e.shiftKey) redo();
+        else undo();
+      }
+      if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === "d") {
+        e.preventDefault();
+        if (id) duplicateLayer(id);
+      }
+      if (e.key === "Escape") selectLayer(null);
+    };
+    document.addEventListener("keydown", onKey);
+    return () => document.removeEventListener("keydown", onKey);
+  }, [deleteLayer, duplicateLayer, selectLayer, undo, redo]);
+
+  // ── Drag Handlers ─────────────────────────────────────────────
+  function handleCardPointerDown(e: React.PointerEvent, item: ComponentMeta) {
+    e.preventDefault();
+    sidebarDragRef.current = { item };
+    setPreviewItem(item);
+    setPreviewPos({ x: e.clientX, y: e.clientY });
+    setDraggingCardKey(item.key);
   }
 
-  function handleClearCanvas() {
-    setLayers([]);
-    setSelectedLayerId(null);
-    setIsDesignConfirmed(false);
-    setAiStatusMessage("🧹 Canvas cleared. Estimate restored to ₹0.");
-    setTimeout(() => setAiStatusMessage(null), 2500);
+  function handleLayerPointerDown(e: React.PointerEvent, layerId: string) {
+    e.stopPropagation();
+    selectLayer(layerId);
+    const layer = useLayerStore.getState().layers.find((l) => l.id === layerId);
+    if (!layer) return;
+
+    layerDragRef.current = {
+      layerId,
+      startX: e.clientX,
+      startY: e.clientY,
+      origX: layer.x,
+      origY: layer.y,
+    };
   }
 
-  // -------------------------------------------------------------
-  // INDIAN JEWELLERY PRICING ENGINE (₹ INR)
-  // -------------------------------------------------------------
+  function handleResizePointerDown(e: React.PointerEvent, layerId: string) {
+    e.stopPropagation();
+    e.preventDefault();
+    const layer = useLayerStore.getState().layers.find((l) => l.id === layerId);
+    if (!layer) return;
+
+    const rect = getCanvasRect();
+    if (!rect) return;
+
+    const centerX = rect.left + (layer.x / 100) * rect.width;
+    const centerY = rect.top + (layer.y / 100) * rect.height;
+    const dx = e.clientX - centerX;
+    const dy = e.clientY - centerY;
+    const startDist = Math.max(Math.sqrt(dx * dx + dy * dy), 8);
+    resizeDragRef.current = { layerId, origScale: layer.scale, startDist, centerX, centerY };
+  }
+
+  function handleRotatePointerDown(e: React.PointerEvent, layerId: string) {
+    e.stopPropagation();
+    e.preventDefault();
+    const layer = useLayerStore.getState().layers.find((l) => l.id === layerId);
+    if (!layer) return;
+
+    const rect = getCanvasRect();
+    if (!rect) return;
+
+    const centerX = rect.left + (layer.x / 100) * rect.width;
+    const centerY = rect.top + (layer.y / 100) * rect.height;
+    const startAngle = Math.atan2(e.clientY - centerY, e.clientX - centerX) * (180 / Math.PI);
+    rotateDragRef.current = { layerId, origRotation: layer.rotation, startAngle, centerX, centerY };
+  }
+
+  function handleCanvasClick(e: React.MouseEvent) {
+    if (e.target === e.currentTarget) selectLayer(null);
+  }
+
+  // ── Pricing Engine ────────────────────────────────────────────
   const indianPricing = useMemo(() => {
-    if (layers.length === 0) {
-      return calculateIndianPricing(metal, 0, 0);
-    }
-
+    if (layers.length === 0) return calculateIndianPricing(metal, 0, 0);
     let goldWeightGrams = 0;
     let stoneCarat = 0;
-
-    const bandLayers = layers.filter((l) => l.type === "band");
-    const settingLayers = layers.filter((l) => l.type === "setting");
-    const stoneLayers = layers.filter((l) => l.type === "stone");
-
-    bandLayers.forEach((l) => {
-      const bandWeights: Record<string, number> = { classic: 2.6, twist: 3.1, pave: 2.9 };
-      goldWeightGrams += bandWeights[l.key] || 2.8;
+    layers.forEach((l) => {
+      if (l.type.includes("band") || l.type.includes("hoop") || l.type.includes("chain")) goldWeightGrams += 2.5;
+      if (l.type.includes("stone") || l.type.includes("ornament")) stoneCarat += 1.0;
     });
-
-    settingLayers.forEach(() => {
-      goldWeightGrams += 0.4;
-    });
-
-    if (bandLayers.length === 0 && settingLayers.length === 0 && layers.length > 0) {
-      goldWeightGrams = 2.5; // fallback gold weight if only stone or accent added
-    }
-
-    if (stoneLayers.length > 0) {
-      const caratMap: Record<string, number> = {
-        round: 1.20,
-        oval: 1.15,
-        princess: 1.05,
-        emerald: 1.30,
-        marquise: 0.95,
-      };
-      stoneLayers.forEach((l) => {
-        stoneCarat += caratMap[l.key] || 1.00;
-      });
-    }
-
     return calculateIndianPricing(metal, goldWeightGrams, stoneCarat);
   }, [layers, metal]);
 
-  // -------------------------------------------------------------
-  // LAYER CONTROLS (Figma standard)
-  // -------------------------------------------------------------
-  function bringForward(layerId: string) {
-    setLayers((prev) =>
-      prev.map((l) => (l.id === layerId ? { ...l, zIndex: l.zIndex + 1 } : l))
-    );
-  }
-
-  function sendBack(layerId: string) {
-    setLayers((prev) =>
-      prev.map((l) => (l.id === layerId ? { ...l, zIndex: Math.max(1, l.zIndex - 1) } : l))
-    );
-  }
-
-  function duplicateLayer(layerId: string) {
-    setLayers((prev) => {
-      const target = prev.find((l) => l.id === layerId);
-      if (!target) return prev;
-      const cloned: LayerObject = {
-        ...target,
-        id: `${target.type}_${Date.now()}`,
-        x: Math.min(92, target.x + 4),
-        y: Math.min(92, target.y + 4),
-        zIndex: prev.length + 1,
-      };
-      setSelectedLayerId(cloned.id);
-      return [...prev, cloned];
-    });
-  }
-
-  function deleteLayer(layerId: string) {
-    setLayers((prev) => prev.filter((l) => l.id !== layerId));
-    if (selectedLayerId === layerId) setSelectedLayerId(null);
-  }
-
-  function updateLayerProperty(layerId: string, prop: keyof LayerObject, value: any) {
-    setLayers((prev) =>
-      prev.map((l) => (l.id === layerId ? { ...l, [prop]: value } : l))
-    );
-  }
-
-  // -------------------------------------------------------------
-  // ADVANCED DRAG & DROP WITH TRANSLUCENT CURSOR PREVIEW
-  // -------------------------------------------------------------
-  function handleCanvasDragOver(e: React.DragEvent) {
-    e.preventDefault();
-    e.dataTransfer.dropEffect = "copy";
-    setIsCanvasDragOver(true);
-
-    if (canvasInnerRef.current) {
-      const rect = canvasInnerRef.current.getBoundingClientRect();
-      const xPct = Number((((e.clientX - rect.left) / rect.width) * 100).toFixed(1));
-      const yPct = Number((((e.clientY - rect.top) / rect.height) * 100).toFixed(1));
-      setDragCursorPos({ x: Math.max(5, Math.min(95, xPct)), y: Math.max(5, Math.min(95, yPct)) });
-    }
-  }
-
-  function handleCanvasDragLeave() {
-    setIsCanvasDragOver(false);
-    setDragCursorPos(null);
-  }
-
-  function handleTrayDrop(e: React.DragEvent) {
-    e.preventDefault();
-    setIsCanvasDragOver(false);
-    setDragCursorPos(null);
-
-    let raw = e.dataTransfer.getData("application/json") || e.dataTransfer.getData("text/plain");
-    if (!raw && activeDragPayload) {
-      raw = JSON.stringify(activeDragPayload);
-    }
-    if (!raw) return;
-    const payload: DragPayload = JSON.parse(raw);
-    const { cat, key } = payload;
-
-    if (!canvasInnerRef.current) return;
-    const rect = canvasInnerRef.current.getBoundingClientRect();
-    const xPct = Number((((e.clientX - rect.left) / rect.width) * 100).toFixed(1));
-    const yPct = Number((((e.clientY - rect.top) / rect.height) * 100).toFixed(1));
-
-    if (cat === "stone") {
-      const comp = checkCompatibility(config.setting, key as StoneKey);
-      if (!comp.isCompatible) {
-        setCompatAlert({
-          message: comp.message || "This gemstone is not compatible with the selected setting.",
-          suggestedLabels: comp.suggestedGemstoneLabels,
-        });
-        return;
-      }
-      setCompatAlert(null);
-    }
-
-    const partInfo = findPart(cat as Category, key);
-    const newLayer: LayerObject = {
-      id: `${cat}_${Date.now()}`,
-      type: cat,
-      key,
-      name: partInfo.name,
-      x: Math.max(8, Math.min(92, xPct)),
-      y: Math.max(8, Math.min(92, yPct)),
-      scale: cat === "band" ? 1.0 : 0.82,
-      rotation: 0,
-      zIndex: layers.length + 1,
-    };
-
-    setConfig((prev) => {
-      if (cat === "band") return { ...prev, band: key as BandKey };
-      if (cat === "setting") return { ...prev, setting: key as SettingKey };
-      if (cat === "stone") return { ...prev, stone: key as StoneKey };
-      return prev;
-    });
-
-    setLayers((prev) => [...prev, newLayer]);
-
-    // IMMEDIATELY SELECT NEW LAYER & SHOW FIGMA HANDLES
-    setSelectedLayerId(newLayer.id);
-
-    setAiStatusMessage(`✨ Placed ${partInfo.name} at (${newLayer.x}%, ${newLayer.y}%). Handles active.`);
-    setTimeout(() => setAiStatusMessage(null), 2500);
-  }
-
-  function handleLayerPointerDown(e: React.PointerEvent, id: string) {
-    e.stopPropagation();
-    setSelectedLayerId(id);
-    setDraggingLayerId(id);
-  }
-
-  function handleCanvasPointerMove(e: React.PointerEvent<HTMLDivElement>) {
-    if (!draggingLayerId || !canvasInnerRef.current) return;
-    const rect = canvasInnerRef.current.getBoundingClientRect();
-    const rawX = ((e.clientX - rect.left) / rect.width) * 100;
-    const rawY = ((e.clientY - rect.top) / rect.height) * 100;
-
-    const clampedX = Number(Math.max(5, Math.min(95, rawX)).toFixed(1));
-    const clampedY = Number(Math.max(5, Math.min(95, rawY)).toFixed(1));
-
-    const nearCenterX = Math.abs(clampedX - 50) < 1.5;
-    const nearCenterY = Math.abs(clampedY - 50) < 1.5;
-    setShowGuideLines(nearCenterX || nearCenterY);
-
-    setLayers((prev) =>
-      prev.map((l) => (l.id === draggingLayerId ? { ...l, x: clampedX, y: clampedY } : l))
-    );
-  }
-
-  function handleCanvasPointerUp() {
-    setDraggingLayerId(null);
-    setShowGuideLines(false);
-  }
-
-  // JSON Save & Open
-  function saveDesignJSON() {
+  // ── AI Auto Align Trigger ─────────────────────────────────────
+  function handleAiAutoAlign() {
     if (layers.length === 0) {
-      alert("Canvas is empty. Drag a Ring Band onto the canvas before saving.");
+      alert("Canvas is empty. Drag jewellery components onto the canvas first!");
       return;
     }
-    const designData: DesignJSON = {
-      id: `design_${Date.now()}`,
-      name: "Custom Jewellery Design",
-      metal,
-      createdAt: new Date().toISOString(),
-      zoom: zoomScale,
-      layers,
-    };
-    const jsonStr = JSON.stringify(designData, null, 2);
-    localStorage.setItem("caratline_saved_design", jsonStr);
-
-    const blob = new Blob([jsonStr], { type: "application/json" });
-    const url = URL.createObjectURL(blob);
-    const a = document.createElement("a");
-    a.href = url;
-    a.download = `jewellery_design_${Date.now()}.json`;
-    a.click();
-    URL.revokeObjectURL(url);
-
-    setAiStatusMessage("💾 Saved Design to JSON!");
-    setTimeout(() => setAiStatusMessage(null), 3000);
+    const rec = computeAiAutoAlign(layers);
+    if (rec) {
+      setAiAlignRecommendation(rec);
+      setIsAiModalOpen(true);
+    }
   }
 
-  function loadDesignFromJSON(e: React.ChangeEvent<HTMLInputElement>) {
-    const file = e.target.files?.[0];
-    if (!file) return;
-    const reader = new FileReader();
-    reader.onload = (event) => {
-      try {
-        const data: DesignJSON = JSON.parse(event.target?.result as string);
-        if (data && Array.isArray(data.layers)) {
-          setLayers(data.layers);
-          if (data.zoom) setZoomScale(data.zoom);
-          if (data.metal) setMetal(data.metal);
-          if (data.layers.length > 0) setSelectedLayerId(data.layers[0].id);
-          setAiStatusMessage(`✅ Restored ${data.layers.length} components!`);
-          setTimeout(() => setAiStatusMessage(null), 3500);
-        }
-      } catch (err) {
-        alert("Invalid design JSON file format.");
-      }
-    };
-    reader.readAsText(file);
-  }
-
-  function handleGenerateLuxuryPreview() {
+  // ── Generate Final Render Trigger ─────────────────────────────
+  function handleGenerateFinalJewellery() {
     if (layers.length === 0) {
-      alert("Canvas is empty. Drag a Ring Band onto the canvas before generating a luxury preview.");
+      alert("Canvas is empty. Add components to build your custom jewellery before generating final render.");
       return;
     }
-    setAiStatusMessage("✨ Collecting CAD metadata & rendering luxury studio preview...");
+    setAiStatusMessage("✨ Rendering catalogue-grade 4K studio jewellery image…");
     setTimeout(() => {
       setAiStatusMessage(null);
       setLuxuryModalOpen(true);
-    }, 1200);
+    }, 1000);
   }
 
-  const filteredParts = PART_LIBRARY[activeTab].filter(
-    (p) =>
-      p.name.toLowerCase().includes(searchQuery.toLowerCase()) ||
-      p.key.toLowerCase().includes(searchQuery.toLowerCase())
-  );
+  // ── Custom Asset Upload Handler with Auto-Classification ──────
+  function handleSaveCustomAsset() {
+    if (!uploadName || !uploadImageUrl) {
+      alert("Please provide asset name and image URL.");
+      return;
+    }
+    // Auto-classify uploaded PNG asset into correct category
+    const targetCategory = classifyUploadedAsset(uploadName, selectedJewelleryType);
 
-  const selectedLayer = layers.find((l) => l.id === selectedLayerId);
+    registerCustomAsset({
+      key: `custom_${Date.now()}`,
+      jewelleryType: selectedJewelleryType,
+      category: targetCategory,
+      name: uploadName,
+      metaLabel: uploadMetaLabel || "Custom Upload",
+      estimatedPriceINR: 15000,
+      imageUrl: uploadImageUrl,
+      isCustom: true,
+    });
+    setUploadModalOpen(false);
+    setUploadName("");
+    setUploadImageUrl("");
+    setAiStatusMessage(`✅ New asset classified as ${targetCategory.replace("_", " ").toUpperCase()}!`);
+    setTimeout(() => setAiStatusMessage(null), 3000);
+  }
 
   return (
-    <div style={{ display: "flex", flexDirection: "column", height: "100vh", width: "100vw", overflow: "hidden", background: "#f8fafc" }} className="atelier-app">
-      
-      {/* 1. TOP HEADER NAVIGATION BAR (Fixed height 60px) */}
-      <header
-        style={{
-          height: "60px",
-          background: "#ffffff",
-          borderBottom: "1px solid rgba(112, 26, 52, 0.15)",
-          padding: "0 24px",
-          display: "flex",
-          alignItems: "center",
-          justifyContent: "space-between",
-          zIndex: 40,
-          boxShadow: "0 2px 10px rgba(0, 0, 0, 0.04)",
-        }}
-      >
-        {/* BRAND LOGO & TITLE */}
-        <div style={{ display: "flex", alignItems: "center", gap: "12px" }}>
-          <div style={{ width: "36px", height: "36px", borderRadius: "10px", background: "linear-gradient(135deg, #701a34, #d6537a)", color: "#fff", display: "flex", alignItems: "center", justifyContent: "center", fontSize: "18px", boxShadow: "0 4px 12px rgba(112, 26, 52, 0.2)" }}>
-            💎
-          </div>
-          <div>
-            <div style={{ fontFamily: "serif", fontStyle: "italic", fontSize: "20px", fontWeight: 700, color: "#701a34", lineHeight: 1 }}>
-              Caratline Studio
-            </div>
-            <div style={{ fontSize: "9px", letterSpacing: "0.15em", textTransform: "uppercase", color: "rgba(112, 26, 52, 0.6)", marginTop: "2px" }}>
-              Manual Drag-and-Drop Workspace
-            </div>
-          </div>
+    <div className="atelier-app" data-metal={metal}>
+      {/* ── HEADER ────────────────────────────────────────── */}
+      <header>
+        <div className="brand">
+          <span className="mark">Caratline</span>
+          <span className="sub">Jewellery Customization Studio</span>
         </div>
 
-        {/* SEARCH BAR */}
-        <div style={{ width: "280px" }}>
-          <input
-            type="text"
-            placeholder="🔍 Search assets (e.g. Round, Classic)..."
-            value={searchQuery}
-            onChange={(e) => setSearchQuery(e.target.value)}
-            style={{
-              width: "100%",
-              background: "#f1f5f9",
-              border: "1px solid rgba(112, 26, 52, 0.15)",
-              borderRadius: "999px",
-              padding: "6px 14px",
-              fontSize: "11px",
-              outline: "none",
-              color: "#4a2733",
-            }}
-          />
+        {/* Metal Switcher */}
+        <div className="metal-switch">
+          {(["rose_gold", "gold", "silver", "platinum"] as Metal[]).map((m) => (
+            <button
+              key={m}
+              className={metal === m ? "active" : ""}
+              onClick={() => setMetal(m)}
+            >
+              {METAL_LABEL[m]}
+            </button>
+          ))}
         </div>
 
-        {/* ACTIONS */}
-        <div style={{ display: "flex", alignItems: "center", gap: "10px" }}>
+        {/* Action Buttons */}
+        <div style={{ display: "flex", gap: "10px", alignItems: "center" }}>
           <button
-            onClick={handleConfirmDesign}
+            onClick={handleAiAutoAlign}
             style={{
-              background: isDesignConfirmed ? "linear-gradient(135deg, #059669, #10b981)" : "linear-gradient(135deg, #701a34, #b83f63)",
-              color: "#ffffff",
+              display: "flex",
+              alignItems: "center",
+              gap: "6px",
+              background: "linear-gradient(135deg, #d6537a, #b83f63)",
+              color: "#fff",
               border: "none",
-              padding: "6px 18px",
+              padding: "8px 16px",
               borderRadius: "999px",
-              fontSize: "11px",
-              fontWeight: 800,
+              fontSize: "12px",
+              fontWeight: 600,
               cursor: "pointer",
-              boxShadow: "0 4px 12px rgba(112, 26, 52, 0.2)",
+              boxShadow: "0 4px 12px rgba(214, 83, 122, 0.3)",
             }}
           >
-            {isDesignConfirmed ? "✅ Design Finalized" : "✅ Confirm Design"}
+            ✨ AI Auto Align
           </button>
-          <button onClick={handleClearCanvas} style={{ background: "#fef2f2", color: "#dc2626", border: "1px solid rgba(220, 38, 38, 0.2)", padding: "6px 14px", borderRadius: "999px", fontSize: "11px", fontWeight: 700, cursor: "pointer" }}>
-            🧹 Clear Canvas
+
+          <button
+            onClick={handleGenerateFinalJewellery}
+            style={{
+              display: "flex",
+              alignItems: "center",
+              gap: "6px",
+              background: "#4a2733",
+              color: "#fff",
+              border: "none",
+              padding: "8px 16px",
+              borderRadius: "999px",
+              fontSize: "12px",
+              fontWeight: 600,
+              cursor: "pointer",
+            }}
+          >
+            💎 Generate Final Jewellery
           </button>
-          <button onClick={saveDesignJSON} style={{ background: "#f1f5f9", color: "#4a2733", border: "1px solid rgba(112, 26, 52, 0.15)", padding: "6px 14px", borderRadius: "999px", fontSize: "11px", fontWeight: 700, cursor: "pointer" }}>
-            💾 Save JSON
-          </button>
-          <button onClick={() => fileInputRef.current?.click()} style={{ background: "#f1f5f9", color: "#4a2733", border: "1px solid rgba(112, 26, 52, 0.15)", padding: "6px 14px", borderRadius: "999px", fontSize: "11px", fontWeight: 700, cursor: "pointer" }}>
-            📂 Open JSON
-          </button>
-          <input type="file" ref={fileInputRef} accept=".json" onChange={loadDesignFromJSON} style={{ display: "none" }} />
         </div>
       </header>
 
-      {/* 2. MAIN WORKSPACE (Starts top-aligned with sidebar, full height calc(100vh - 60px)) */}
-      <div style={{ display: "flex", flex: 1, height: "calc(100vh - 60px)", width: "100%", overflow: "hidden" }}>
-        
-        {/* LEFT SIDEBAR (Width: 380px, Scrollable) */}
-        <aside style={{ width: "380px", height: "100%", background: "#ffffff", borderRight: "1px solid rgba(112, 26, 52, 0.15)", display: "flex", flexDirection: "column", flexShrink: 0 }}>
-          
-          {/* METAL SELECTOR */}
-          <div style={{ padding: "16px 20px", borderBottom: "1px solid rgba(112, 26, 52, 0.1)" }}>
-            <label style={{ fontSize: "10px", fontWeight: 800, letterSpacing: "0.12em", textTransform: "uppercase", color: "#701a34", display: "block", marginBottom: "10px" }}>
-              SELECT PRECIOUS METAL
-            </label>
-            <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: "8px" }}>
-              {(["rose_gold", "gold", "silver", "platinum"] as Metal[]).map((m) => (
-                <button
-                  key={m}
-                  onClick={() => setMetal(m)}
-                  style={{
-                    background: metal === m ? "linear-gradient(135deg, #701a34, #b83f63)" : "#fff7f9",
-                    color: metal === m ? "#ffffff" : "#4a2733",
-                    border: metal === m ? "none" : "1px solid rgba(112, 26, 52, 0.15)",
-                    padding: "8px 12px",
-                    borderRadius: "12px",
-                    fontSize: "11px",
-                    fontWeight: 700,
-                    cursor: "pointer",
-                    boxShadow: metal === m ? "0 4px 12px rgba(112, 26, 52, 0.2)" : "none",
-                    transition: "all 0.2s",
-                  }}
-                >
-                  {METAL_LABEL[m]}
-                </button>
-              ))}
-            </div>
-          </div>
-
-          {/* CATEGORY TABS */}
-          <div style={{ display: "flex", borderBottom: "1px solid rgba(112, 26, 52, 0.1)" }}>
-            {CATEGORIES.map((cat) => (
+      {/* ── MAIN BODY GRID (3-Column Layout) ───────────────── */}
+      <div className="body-grid">
+        {/* ── LEFT PANEL: ASSET LIBRARY (~250px) ─────────────── */}
+        <aside className="library">
+          {/* Top Jewellery Type Tabs (Rings, Earrings, Pendants) */}
+          <div style={{ display: "flex", borderBottom: "1px solid var(--line)", background: "var(--panel-alt)" }}>
+            {JEWELLERY_TYPES.map((jt) => (
               <button
-                key={cat}
-                onClick={() => setActiveTab(cat)}
+                key={jt.key}
+                onClick={() => setSelectedJewelleryType(jt.key)}
                 style={{
                   flex: 1,
-                  background: "none",
-                  border: "none",
-                  borderBottom: activeTab === cat ? "2.5px solid #701a34" : "2.5px solid transparent",
-                  color: activeTab === cat ? "#701a34" : "rgba(74, 39, 51, 0.5)",
+                  padding: "10px 4px",
                   fontSize: "11px",
-                  fontWeight: activeTab === cat ? 800 : 600,
-                  padding: "12px 4px",
+                  fontWeight: selectedJewelleryType === jt.key ? 700 : 500,
+                  color: selectedJewelleryType === jt.key ? "var(--berry)" : "var(--ink-dim)",
+                  background: selectedJewelleryType === jt.key ? "var(--panel)" : "transparent",
+                  border: "none",
+                  borderBottom: selectedJewelleryType === jt.key ? "2px solid var(--berry)" : "2px solid transparent",
                   cursor: "pointer",
                 }}
               >
-                {CATEGORY_LABEL[cat]}
+                {jt.icon} {jt.label}
               </button>
             ))}
           </div>
 
-          {/* ASSET LIBRARY GRID */}
-          <div style={{ padding: "16px", flex: 1, overflowY: "auto", display: "flex", flexDirection: "column", gap: "12px" }}>
-            {filteredParts.map((part) => (
+          {/* Sub-Category Sub-Tabs */}
+          <div className="tabs" style={{ flexWrap: "wrap" }}>
+            {CATEGORIES_BY_JEWELLERY_TYPE[selectedJewelleryType].map((cat) => (
+              <button
+                key={cat.key}
+                className={activeCategoryKey === cat.key ? "active" : ""}
+                onClick={() => setActiveCategoryKey(cat.key)}
+                style={{ fontSize: "9px", padding: "8px 4px" }}
+              >
+                {cat.label}
+              </button>
+            ))}
+          </div>
+
+          {/* Search + Extensible Custom Upload Button */}
+          <div style={{ padding: "10px 14px 4px", display: "flex", gap: "6px" }}>
+            <input
+              type="text"
+              placeholder="Search components…"
+              value={searchQuery}
+              onChange={(e) => setSearchQuery(e.target.value)}
+              style={{
+                flex: 1,
+                padding: "6px 10px",
+                borderRadius: "8px",
+                border: "1px solid var(--line)",
+                fontSize: "11px",
+                background: "var(--panel)",
+                color: "var(--ink)",
+              }}
+            />
+            <button
+              onClick={() => setUploadModalOpen(true)}
+              title="Upload custom component asset"
+              style={{
+                padding: "6px 10px",
+                borderRadius: "8px",
+                border: "1px solid var(--berry)",
+                background: "rgba(214, 83, 122, 0.1)",
+                color: "var(--berry)",
+                fontSize: "11px",
+                fontWeight: 600,
+                cursor: "pointer",
+              }}
+            >
+              + Upload
+            </button>
+          </div>
+
+          {/* Asset Scroll List (Realistic Component Cards) */}
+          <div className="parts-scroll">
+            {currentCategoryAssets.map((item) => (
               <div
-                key={part.key}
-                draggable
-                onDragStart={(e) => {
-                  const payload: DragPayload = { cat: activeTab, key: part.key };
-                  e.dataTransfer.setData("application/json", JSON.stringify(payload));
-                  e.dataTransfer.setData("text/plain", JSON.stringify(payload));
-                  setActiveDragPayload(payload);
-                }}
-                onDragEnd={() => {
-                  setActiveDragPayload(null);
-                  setIsCanvasDragOver(false);
-                  setDragCursorPos(null);
-                }}
+                key={item.key}
+                className="part-card"
+                onPointerDown={(e) => handleCardPointerDown(e, item)}
                 style={{
-                  background: "linear-gradient(135deg, #ffffff, #fff7f9)",
-                  border: "1px solid rgba(112, 26, 52, 0.15)",
-                  borderRadius: "16px",
-                  padding: "12px",
+                  opacity: draggingCardKey === item.key ? 0.4 : 1,
+                  transform: draggingCardKey === item.key ? "scale(0.97)" : "none",
                   display: "flex",
                   alignItems: "center",
-                  gap: "14px",
+                  justifyContent: "space-between",
+                  padding: "10px",
+                  border: "1px solid var(--line)",
+                  borderRadius: "14px",
+                  background: "var(--panel-alt)",
                   cursor: "grab",
                   userSelect: "none",
-                  boxShadow: "0 4px 12px rgba(112, 26, 52, 0.04)",
-                  transition: "all 0.2s ease",
                 }}
               >
+                <div style={{ display: "flex", alignItems: "center", gap: "10px" }}>
+                  {renderPartIcon(item.category, item.key, 46, metal)}
+                  <div className="info">
+                    <div className="name" style={{ fontWeight: 700, fontSize: "12px", color: "var(--ink)" }}>
+                      {item.name}
+                    </div>
+                    <div className="meta" style={{ fontSize: "10px", color: "var(--ink-dim)", marginTop: "2px" }}>
+                      {item.grams ? `${item.grams} g` : item.metaLabel} · {formatINR(item.estimatedPriceINR)}
+                    </div>
+                  </div>
+                </div>
+
                 <div
                   style={{
-                    width: "64px",
-                    height: "64px",
-                    borderRadius: "14px",
-                    background: "radial-gradient(circle at 50% 50%, #ffffff, #fbe8ee)",
-                    border: "1px solid rgba(214, 83, 122, 0.2)",
-                    display: "flex",
-                    alignItems: "center",
-                    justifyContent: "center",
-                    flexShrink: 0,
-                    pointerEvents: "none",
+                    fontSize: "9px",
+                    fontWeight: 700,
+                    color: "var(--berry)",
+                    background: "rgba(214, 83, 122, 0.12)",
+                    padding: "3px 6px",
+                    borderRadius: "6px",
+                    whiteSpace: "nowrap",
                   }}
                 >
-                  {renderPartIcon(activeTab, part.key, 52, metal, "three_quarter")}
-                </div>
-                <div style={{ flex: 1, pointerEvents: "none" }}>
-                  <div style={{ fontSize: "13px", fontWeight: 700, color: "#4a2733" }}>{part.name}</div>
-                  <div style={{ fontSize: "11px", color: "#d6537a", fontWeight: 600, marginTop: "2px" }}>{part.metaLabel}</div>
-                  <div style={{ fontSize: "9px", color: "rgba(74, 39, 51, 0.5)", marginTop: "3px" }}>+ Drag onto Canvas</div>
+                  + Drag to Canvas
                 </div>
               </div>
             ))}
+
+            {currentCategoryAssets.length === 0 && (
+              <div style={{ padding: "20px", textAlign: "center", fontSize: "11px", color: "var(--ink-dim)" }}>
+                No components found in this category. Click &quot;+ Upload&quot; to add a custom asset!
+              </div>
+            )}
+          </div>
+
+          <div className="library-hint">
+            💡 Drag any component onto the 70% canvas. Every component is an independent layer.
           </div>
         </aside>
 
-        {/* RIGHT WORKSPACE AREA (Checkerboard background, centered canvas, bottom toolbar) */}
-        <main
-          className="checkerboard-bg"
-          onPointerMove={handleCanvasPointerMove}
-          onPointerUp={handleCanvasPointerUp}
-          style={{ flex: 1, height: "100%", display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center", padding: "24px", position: "relative", overflow: "hidden" }}
-        >
-
-          {/* COMPATIBILITY ALERT BANNER */}
-          {compatAlert && (
+        {/* ── CENTER CANVAS AREA (~70% Screen) ──────────────── */}
+        <main className="stage" style={{ background: "#f8f9fa", position: "relative" }}>
+          {/* Status Message Overlay */}
+          {aiStatusMessage && (
             <div
               style={{
                 position: "absolute",
-                top: "20px",
+                top: "16px",
                 left: "50%",
                 transform: "translateX(-50%)",
-                zIndex: 45,
-                width: "90%",
-                maxWidth: "540px",
-                background: "linear-gradient(135deg, #f59e0b, #d97706)",
+                background: "rgba(74, 39, 51, 0.9)",
                 color: "#ffffff",
-                padding: "10px 16px",
-                borderRadius: "14px",
-                boxShadow: "0 8px 24px rgba(245, 158, 11, 0.35)",
-                display: "flex",
-                alignItems: "center",
-                gap: "10px",
+                padding: "8px 18px",
+                borderRadius: "999px",
+                fontSize: "12px",
+                fontWeight: 600,
+                zIndex: 20,
+                backdropFilter: "blur(8px)",
+                boxShadow: "0 4px 16px rgba(0,0,0,0.15)",
               }}
             >
-              <span style={{ fontSize: "22px" }}>⚠️</span>
-              <div style={{ flex: 1, textAlign: "left" }}>
-                <div style={{ fontWeight: 800, fontSize: "12px" }}>{compatAlert.message}</div>
-                <div style={{ fontSize: "11px", opacity: 0.95, marginTop: "2px" }}>
-                  Suggested compatible gemstones: {compatAlert.suggestedLabels.join(", ")}
-                </div>
-              </div>
-              <button onClick={() => setCompatAlert(null)} style={{ background: "rgba(0,0,0,0.2)", border: "none", color: "#fff", borderRadius: "50%", width: "22px", height: "22px", cursor: "pointer" }}>✕</button>
+              {aiStatusMessage}
             </div>
           )}
 
-          {/* CENTERED CANVAS CONTAINER (Starts EMPTY with placeholder "Drag a Ring Band here to begin designing.") */}
+          {/* Canvas Tray (White design canvas) */}
           <div
-            className={`tray ${isCanvasDragOver ? "canvas-drag-active" : ""}`}
-            onDragOver={handleCanvasDragOver}
-            onDragLeave={handleCanvasDragLeave}
-            onDrop={handleTrayDrop}
+            ref={canvasTrayRef}
+            className={`tray${isOverCanvas ? " canvas-drag-active" : ""}`}
+            onClick={handleCanvasClick}
             style={{
               width: "780px",
               height: "780px",
               background: "#ffffff",
               borderRadius: "24px",
-              boxShadow: "0 20px 50px rgba(0, 0, 0, 0.12)",
-              border: "1px solid rgba(112, 26, 52, 0.15)",
+              boxShadow: "0 20px 50px rgba(0,0,0,0.08)",
+              border: "1px solid rgba(112,26,52,0.15)",
               position: "relative",
               transform: `scale(${zoomScale})`,
               transition: "transform 0.15s ease-out, border 0.2s, box-shadow 0.2s",
+              touchAction: "none",
+              isolation: "isolate",
             }}
           >
+            {/* Grid Overlay */}
             {showGrid && <div className="canvas-grid-overlay" />}
 
-            {/* ALIGNMENT CENTERLINES */}
-            {showGuideLines && (
-              <>
-                <div style={{ position: "absolute", top: 0, bottom: 0, left: "50%", width: "1px", background: "#ef4444", zIndex: 40, pointerEvents: "none" }} />
-                <div style={{ position: "absolute", left: 0, right: 0, top: "50%", height: "1px", background: "#ef4444", zIndex: 40, pointerEvents: "none" }} />
-              </>
+            {/* Guide Lines */}
+            {showGuideLines && guideLines.v && (
+              <div className="centerline show" style={{ left: "50%" }} />
+            )}
+            {showGuideLines && guideLines.h && (
+              <div className="centerline show" style={{ top: "50%", width: "100%", height: "1px" }} />
             )}
 
-            {/* EMPTY PLACEHOLDER ("Drag a Ring Band here to begin designing.") */}
+            {/* Empty Canvas Prompt */}
             {layers.length === 0 && (
               <div
                 style={{
@@ -652,91 +711,124 @@ export function RingConfigurator() {
                   flexDirection: "column",
                   alignItems: "center",
                   justifyContent: "center",
-                  gap: "12px",
-                  color: "rgba(112, 26, 52, 0.5)",
                   pointerEvents: "none",
+                  opacity: 0.5,
+                  textAlign: "center",
+                  padding: "40px",
                 }}
               >
-                <div style={{ fontSize: "44px" }}>💍</div>
-                <div style={{ fontSize: "17px", fontWeight: 700, fontFamily: "serif", fontStyle: "italic", color: "#701a34" }}>
-                  Drag a Ring Band here to begin designing.
+                <div style={{ fontSize: "36px", marginBottom: "8px" }}>✨</div>
+                <div style={{ fontSize: "16px", fontWeight: 700, fontFamily: "serif", color: "#701a34" }}>
+                  Drag & Drop components onto the canvas
                 </div>
-                <div style={{ fontSize: "11px", color: "rgba(74, 39, 51, 0.45)" }}>
-                  Select a metal from the left panel and drag ring bands, settings, or gemstones onto this canvas.
+                <div style={{ fontSize: "11px", color: "rgba(74,39,51,0.6)", marginTop: "4px" }}>
+                  Select from Rings, Earrings, or Pendants in the left panel. Every component moves freely.
                 </div>
               </div>
             )}
 
-            {/* TRANSLUCENT CURSOR PREVIEW FOLLOWING MOUSE WHILE DRAGGING */}
-            {isCanvasDragOver && dragCursorPos && activeDragPayload && (
-              <div
-                className="drag-cursor-preview"
-                style={{
-                  left: `${dragCursorPos.x}%`,
-                  top: `${dragCursorPos.y}%`,
-                }}
-              >
-                {renderPartIcon(
-                  activeDragPayload.cat,
-                  activeDragPayload.key,
-                  activeDragPayload.cat === "band" ? 380 : 90,
-                  metal,
-                  "three_quarter"
-                )}
-              </div>
-            )}
-
-            {/* CANVAS DRAWING INNER LAYERS */}
-            <div className="canvas-inner" ref={canvasInnerRef} style={{ width: "100%", height: "100%", position: "relative" }}>
-              {layers
+            {/* ── CANVAS LAYERS ───────────────────────────────── */}
+            <div style={{ width: "100%", height: "100%", position: "relative" }}>
+              {[...layers]
                 .sort((a, b) => a.zIndex - b.zIndex)
                 .map((layer) => {
-                  const isSelected = selectedLayerId === layer.id;
+                  const isSelected = layer.id === selectedLayerId;
+
                   return (
                     <div
                       key={layer.id}
-                      className={`free-layer ${isSelected ? "selected" : ""}`}
                       onPointerDown={(e) => handleLayerPointerDown(e, layer.id)}
                       style={{
                         position: "absolute",
                         left: `${layer.x}%`,
                         top: `${layer.y}%`,
                         zIndex: layer.zIndex,
-                        transform: `translate(-50%, -50%) rotate(${layer.rotation}deg) scale(${layer.scale})`,
+                        transform: `translate(-50%,-50%) rotate(${layer.rotation}deg) scale(${layer.scale})`,
+                        filter: "drop-shadow(0px 8px 16px rgba(0, 0, 0, 0.12))",
                         cursor: "grab",
                         userSelect: "none",
                         touchAction: "none",
                       }}
                     >
-                      {layer.type === "setting" ? (
-                        <CadSetting settingKey={layer.key as SettingKey} metal={metal} layer="front" size={110} />
+                      {/* Component Rendering */}
+                      {layer.category.includes("center_stone") && layer.jewelleryType === "ring" ? (
+                        <div
+                          style={{
+                            position: "relative",
+                            width: 170,
+                            height: 170,
+                            display: "flex",
+                            alignItems: "center",
+                            justifyContent: "center",
+                          }}
+                        >
+                          {/* Back Prongs */}
+                          <div style={{ position: "absolute", inset: 0, display: "flex", alignItems: "center", justifyContent: "center", zIndex: 1, pointerEvents: "none" }}>
+                            <CadSetting settingKey="prong" metal={metal} layer="back" size={170} />
+                          </div>
+
+                          {/* Contact Shadow */}
+                          <div
+                            style={{
+                              position: "absolute",
+                              bottom: "16%",
+                              left: "50%",
+                              transform: "translateX(-50%)",
+                              width: "56%",
+                              height: "10%",
+                              borderRadius: "50%",
+                              background: "radial-gradient(ellipse, rgba(30,8,16,0.45) 0%, transparent 75%)",
+                              zIndex: 2,
+                              pointerEvents: "none",
+                              filter: "blur(4px)",
+                            }}
+                          />
+
+                          {/* Diamond Gemstone */}
+                          <div
+                            style={{
+                              position: "relative",
+                              zIndex: 3,
+                              pointerEvents: "none",
+                              clipPath: "polygon(0% 0%, 100% 0%, 100% 70%, 50% 82%, 0% 70%)",
+                            }}
+                          >
+                            {renderDiamondForCanvas(layer.key, 185, metal)}
+                          </div>
+
+                          {/* Front Prongs */}
+                          <div style={{ position: "absolute", inset: 0, display: "flex", alignItems: "center", justifyContent: "center", zIndex: 4, pointerEvents: "none" }}>
+                            <CadSetting settingKey="prong" metal={metal} layer="front" size={170} />
+                          </div>
+                        </div>
+                      ) : layer.category.includes("setting") ? (
+                        <CadSetting settingKey={(layer.key as any) || "prong"} metal={metal} layer="front" size={120} />
                       ) : (
-                        renderPartIcon(layer.type as Category, layer.key, layer.type === "band" ? 400 : 90, metal, "three_quarter")
+                        renderPartIcon(
+                          layer.category,
+                          layer.key,
+                          layer.category.includes("band") || layer.category.includes("chain") ? 380 : 120,
+                          metal
+                        )
                       )}
 
+                      {/* Selection Box & Resize/Rotate Handles */}
                       {isSelected && (
                         <div className="figma-selection-box">
-                          <div className="resize-handle nw" />
-                          <div className="resize-handle ne" />
-                          <div className="resize-handle sw" />
-                          <div className="resize-handle se" />
+                          {(["nw", "ne", "sw", "se"] as const).map((h) => (
+                            <div
+                              key={h}
+                              className={`resize-handle ${h}`}
+                              onPointerDown={(e) => handleResizePointerDown(e, layer.id)}
+                            />
+                          ))}
 
                           <div
                             className="rotate-handle"
-                            title="Rotate layer"
-                            onClick={(e) => {
-                              e.stopPropagation();
-                              updateLayerProperty(layer.id, "rotation", (layer.rotation + 45) % 360);
-                            }}
+                            title="Drag to rotate"
+                            onPointerDown={(e) => handleRotatePointerDown(e, layer.id)}
                           >
-                            🔄
-                          </div>
-
-                          <div className="layer-floating-toolbar">
-                            <button title="Bring Forward" onClick={() => bringForward(layer.id)}>⬆️</button>
-                            <button title="Send Back" onClick={() => sendBack(layer.id)}>⬇️</button>
-                            <button title="Duplicate" onClick={() => duplicateLayer(layer.id)}>📋</button>
-                            <button title="Delete" onClick={() => deleteLayer(layer.id)}>🗑️</button>
+                            ↻
                           </div>
                         </div>
                       )}
@@ -746,255 +838,423 @@ export function RingConfigurator() {
             </div>
           </div>
 
-          {/* 3. BOTTOM CONTROLS BAR (Zoom, Reset View, Live Price Estimate, Generate Luxury Preview) */}
-          <div
-            style={{
-              marginTop: "20px",
-              background: "rgba(255, 255, 255, 0.95)",
-              backdropFilter: "blur(12px)",
-              border: "1px solid rgba(112, 26, 52, 0.15)",
-              borderRadius: "999px",
-              padding: "8px 24px",
-              display: "flex",
-              alignItems: "center",
-              gap: "24px",
-              boxShadow: "0 10px 30px rgba(0, 0, 0, 0.08)",
-              zIndex: 30,
-            }}
-          >
-            {/* ZOOM CONTROLS */}
-            <div style={{ display: "flex", alignItems: "center", gap: "8px", fontSize: "12px" }}>
-              <span style={{ fontSize: "10px", fontWeight: 800, color: "#701a34", textTransform: "uppercase" }}>ZOOM:</span>
-              <button onClick={() => setZoomScale((z) => Math.max(0.5, Number((z - 0.1).toFixed(1))))} style={{ background: "none", border: "none", cursor: "pointer", fontWeight: 800, color: "#701a34", fontSize: "14px" }}>-</button>
-              <span style={{ fontWeight: 700, fontFamily: "monospace", color: "#4a2733" }}>{Math.round(zoomScale * 100)}%</span>
-              <button onClick={() => setZoomScale((z) => Math.min(2.5, Number((z + 0.1).toFixed(1))))} style={{ background: "none", border: "none", cursor: "pointer", fontWeight: 800, color: "#701a34", fontSize: "14px" }}>+</button>
-              <button onClick={() => setZoomScale(1.0)} style={{ background: "none", border: "none", cursor: "pointer", fontSize: "11px", color: "rgba(74,39,51,0.6)", textDecoration: "underline" }}>Reset View</button>
-            </div>
-
-            <span style={{ opacity: 0.2 }}>|</span>
-
-            {/* LIVE INDIAN TOTAL PRICE READOUT */}
-            <div style={{ display: "flex", alignItems: "baseline", gap: "6px" }}>
-              <span style={{ fontSize: "10px", fontWeight: 800, color: "rgba(74,39,51,0.6)", textTransform: "uppercase" }}>TOTAL ESTIMATE:</span>
-              <span style={{ fontSize: "18px", fontWeight: 800, color: "#701a34", fontFamily: "serif" }}>{formatINR(indianPricing.total)}</span>
-            </div>
-
-            <span style={{ opacity: 0.2 }}>|</span>
-
-            {/* GENERATE PREVIEW BUTTON */}
-            <button
-              onClick={handleGenerateLuxuryPreview}
+          {/* Floating Drag Ghost */}
+          {sidebarDragRef.current && previewPos && previewItem && (
+            <div
               style={{
-                background: "linear-gradient(135deg, #701a34, #d6537a)",
-                color: "#ffffff",
-                border: "none",
-                padding: "8px 20px",
-                borderRadius: "999px",
-                fontSize: "12px",
-                fontWeight: 700,
-                cursor: "pointer",
-                boxShadow: "0 4px 14px rgba(112, 26, 52, 0.3)",
+                position: "fixed",
+                left: previewPos.x,
+                top: previewPos.y,
+                transform: "translate(-50%,-50%) scale(1.1)",
+                pointerEvents: "none",
+                zIndex: 9999,
+                opacity: 0.85,
+                filter: "drop-shadow(0 12px 24px rgba(0,0,0,0.25))",
               }}
             >
-              ✨ Generate Luxury Preview
-            </button>
+              {renderPartIcon(previewItem.category, previewItem.key, 80, metal)}
+            </div>
+          )}
+
+          {/* ── BOTTOM TOOLBAR ────────────────────────────────── */}
+          <div
+            style={{
+              position: "absolute",
+              bottom: "16px",
+              left: "50%",
+              transform: "translateX(-50%)",
+              background: "rgba(255, 255, 255, 0.95)",
+              backdropFilter: "blur(12px)",
+              border: "1px solid var(--line)",
+              borderRadius: "999px",
+              padding: "6px 16px",
+              display: "flex",
+              alignItems: "center",
+              gap: "12px",
+              boxShadow: "0 8px 24px rgba(74, 39, 51, 0.15)",
+              zIndex: 15,
+            }}
+          >
+            {/* Zoom Controls */}
+            <div style={{ display: "flex", alignItems: "center", gap: "4px", borderRight: "1px solid var(--line)", paddingRight: "10px" }}>
+              <button
+                onClick={() => setZoomScale((z) => Math.max(0.5, Math.round((z - 0.1) * 10) / 10))}
+                title="Zoom Out"
+                style={{ background: "none", border: "none", cursor: "pointer", fontSize: "14px", padding: "4px 8px" }}
+              >
+                🔍−
+              </button>
+              <span style={{ fontSize: "11px", fontWeight: 600, color: "var(--ink)", width: "38px", textAlign: "center" }}>
+                {Math.round(zoomScale * 100)}%
+              </span>
+              <button
+                onClick={() => setZoomScale((z) => Math.min(2.0, Math.round((z + 0.1) * 10) / 10))}
+                title="Zoom In"
+                style={{ background: "none", border: "none", cursor: "pointer", fontSize: "14px", padding: "4px 8px" }}
+              >
+                🔍+
+              </button>
+              <button
+                onClick={() => setZoomScale(1.0)}
+                title="Reset View"
+                style={{ background: "none", border: "none", cursor: "pointer", fontSize: "10px", color: "var(--ink-dim)", padding: "4px 6px" }}
+              >
+                Reset
+              </button>
+            </div>
+
+            {/* Undo / Redo */}
+            <div style={{ display: "flex", gap: "4px", borderRight: "1px solid var(--line)", paddingRight: "10px" }}>
+              <button
+                onClick={undo}
+                disabled={!canUndo}
+                title="Undo (Ctrl+Z)"
+                style={{
+                  background: "none",
+                  border: "none",
+                  cursor: canUndo ? "pointer" : "not-allowed",
+                  opacity: canUndo ? 1 : 0.4,
+                  fontSize: "14px",
+                  padding: "4px 8px",
+                }}
+              >
+                ↩ Undo
+              </button>
+              <button
+                onClick={redo}
+                disabled={!canRedo}
+                title="Redo (Ctrl+Shift+Z)"
+                style={{
+                  background: "none",
+                  border: "none",
+                  cursor: canRedo ? "pointer" : "not-allowed",
+                  opacity: canRedo ? 1 : 0.4,
+                  fontSize: "14px",
+                  padding: "4px 8px",
+                }}
+              >
+                ↪ Redo
+              </button>
+            </div>
+
+            {/* Layer Actions */}
+            <div style={{ display: "flex", gap: "6px" }}>
+              <button
+                onClick={() => selectedLayerId && duplicateLayer(selectedLayerId)}
+                disabled={!selectedLayerId}
+                title="Duplicate Layer"
+                style={{
+                  background: "none",
+                  border: "none",
+                  cursor: selectedLayerId ? "pointer" : "not-allowed",
+                  opacity: selectedLayerId ? 1 : 0.4,
+                  fontSize: "12px",
+                  padding: "4px 8px",
+                }}
+              >
+                📋 Duplicate
+              </button>
+              <button
+                onClick={() => selectedLayerId && bringForward(selectedLayerId)}
+                disabled={!selectedLayerId}
+                title="Bring Forward"
+                style={{
+                  background: "none",
+                  border: "none",
+                  cursor: selectedLayerId ? "pointer" : "not-allowed",
+                  opacity: selectedLayerId ? 1 : 0.4,
+                  fontSize: "12px",
+                  padding: "4px 8px",
+                }}
+              >
+                ⬆ Forward
+              </button>
+              <button
+                onClick={() => selectedLayerId && sendBack(selectedLayerId)}
+                disabled={!selectedLayerId}
+                title="Send Back"
+                style={{
+                  background: "none",
+                  border: "none",
+                  cursor: selectedLayerId ? "pointer" : "not-allowed",
+                  opacity: selectedLayerId ? 1 : 0.4,
+                  fontSize: "12px",
+                  padding: "4px 8px",
+                }}
+              >
+                ⬇ Back
+              </button>
+              <button
+                onClick={() => selectedLayerId && deleteLayer(selectedLayerId)}
+                disabled={!selectedLayerId}
+                title="Delete Layer"
+                style={{
+                  background: "none",
+                  border: "none",
+                  cursor: selectedLayerId ? "pointer" : "not-allowed",
+                  opacity: selectedLayerId ? 1 : 0.4,
+                  color: "#d6537a",
+                  fontSize: "12px",
+                  padding: "4px 8px",
+                }}
+              >
+                🗑 Delete
+              </button>
+            </div>
           </div>
         </main>
 
-        {/* RIGHT INSPECTOR SIDEBAR */}
-        <aside style={{ width: "300px", height: "100%", background: "#ffffff", borderLeft: "1px solid rgba(112, 26, 52, 0.15)", display: "flex", flexDirection: "column", flexShrink: 0 }}>
-          <div style={{ padding: "18px 20px", borderBottom: "1px solid rgba(112, 26, 52, 0.1)" }}>
-            <h3 style={{ fontSize: "15px", fontWeight: 700, color: "#701a34", margin: 0 }}>Layer Inspector</h3>
-            <div style={{ fontSize: "10px", color: "rgba(74, 39, 51, 0.6)", marginTop: "2px" }}>Exact Positioning & Layer Order</div>
-          </div>
+        {/* ── RIGHT PANEL: LAYER INSPECTOR (~270px) ─────────── */}
+        <aside className="docket">
+          <h3>Layer Inspector</h3>
+          <p style={{ margin: "0 18px 12px", fontSize: "11px", color: "var(--ink-dim)" }}>
+            Independent component properties
+          </p>
 
+          {/* Active Layer Properties Controls */}
           {selectedLayer ? (
-            <div style={{ padding: "16px", display: "flex", flexDirection: "column", gap: "14px", flex: 1, overflowY: "auto" }}>
-              <div style={{ background: "#fff7f9", border: "1px solid rgba(112, 26, 52, 0.15)", borderRadius: "14px", padding: "12px" }}>
-                <div style={{ fontSize: "12px", fontWeight: 700, color: "#701a34" }}>{selectedLayer.name}</div>
-                <div style={{ fontSize: "10px", fontFamily: "monospace", color: "rgba(74,39,51,0.6)", marginTop: "3px" }}>
-                  Type: {selectedLayer.type.toUpperCase()}
+            <div style={{ padding: "0 14px 16px", display: "flex", flexDirection: "column", gap: "12px" }}>
+              <div style={{ background: "var(--panel-alt)", padding: "12px", borderRadius: "12px", border: "1px solid var(--line)" }}>
+                <div style={{ fontWeight: 700, fontSize: "13px", color: "var(--ink)" }}>{selectedLayer.name}</div>
+                <div style={{ fontSize: "10px", color: "var(--ink-dim)", marginTop: "2px" }}>
+                  Type: {selectedLayer.jewelleryType.toUpperCase()} · {selectedLayer.category}
                 </div>
               </div>
 
+              {/* Position X Slider */}
               <div>
-                <label style={{ fontSize: "11px", fontWeight: 700, color: "#4a2733" }}>Position X ({selectedLayer.x}%):</label>
+                <div style={{ display: "flex", justifyContent: "space-between", fontSize: "11px", marginBottom: "4px" }}>
+                  <span>Position X</span>
+                  <span style={{ fontWeight: 600 }}>{selectedLayer.x}%</span>
+                </div>
                 <input
                   type="range"
-                  min="5"
-                  max="95"
+                  min="0"
+                  max="100"
                   step="0.5"
                   value={selectedLayer.x}
-                  onChange={(e) => updateLayerProperty(selectedLayer.id, "x", parseFloat(e.target.value))}
-                  style={{ width: "100%", marginTop: "4px" }}
+                  onChange={(e) => updateLayer(selectedLayer.id, { x: parseFloat(e.target.value) })}
+                  style={{ width: "100%" }}
                 />
               </div>
 
+              {/* Position Y Slider */}
               <div>
-                <label style={{ fontSize: "11px", fontWeight: 700, color: "#4a2733" }}>Position Y ({selectedLayer.y}%):</label>
+                <div style={{ display: "flex", justifyContent: "space-between", fontSize: "11px", marginBottom: "4px" }}>
+                  <span>Position Y</span>
+                  <span style={{ fontWeight: 600 }}>{selectedLayer.y}%</span>
+                </div>
                 <input
                   type="range"
-                  min="5"
-                  max="95"
+                  min="0"
+                  max="100"
                   step="0.5"
                   value={selectedLayer.y}
-                  onChange={(e) => updateLayerProperty(selectedLayer.id, "y", parseFloat(e.target.value))}
-                  style={{ width: "100%", marginTop: "4px" }}
+                  onChange={(e) => updateLayer(selectedLayer.id, { y: parseFloat(e.target.value) })}
+                  style={{ width: "100%" }}
                 />
               </div>
 
+              {/* Scale Slider */}
               <div>
-                <label style={{ fontSize: "11px", fontWeight: 700, color: "#4a2733" }}>Scale ({selectedLayer.scale.toFixed(2)}x):</label>
+                <div style={{ display: "flex", justifyContent: "space-between", fontSize: "11px", marginBottom: "4px" }}>
+                  <span>Scale</span>
+                  <span style={{ fontWeight: 600 }}>{selectedLayer.scale}x</span>
+                </div>
                 <input
                   type="range"
                   min="0.3"
                   max="2.5"
                   step="0.05"
                   value={selectedLayer.scale}
-                  onChange={(e) => updateLayerProperty(selectedLayer.id, "scale", parseFloat(e.target.value))}
-                  style={{ width: "100%", marginTop: "4px" }}
+                  onChange={(e) => updateLayer(selectedLayer.id, { scale: parseFloat(e.target.value) })}
+                  style={{ width: "100%" }}
                 />
               </div>
 
+              {/* Rotation Slider */}
               <div>
-                <label style={{ fontSize: "11px", fontWeight: 700, color: "#4a2733" }}>Rotation ({selectedLayer.rotation}°):</label>
+                <div style={{ display: "flex", justifyContent: "space-between", fontSize: "11px", marginBottom: "4px" }}>
+                  <span>Rotation</span>
+                  <span style={{ fontWeight: 600 }}>{selectedLayer.rotation}°</span>
+                </div>
                 <input
                   type="range"
                   min="0"
                   max="360"
-                  step="5"
+                  step="1"
                   value={selectedLayer.rotation}
-                  onChange={(e) => updateLayerProperty(selectedLayer.id, "rotation", parseInt(e.target.value))}
-                  style={{ width: "100%", marginTop: "4px" }}
+                  onChange={(e) => updateLayer(selectedLayer.id, { rotation: parseInt(e.target.value, 10) })}
+                  style={{ width: "100%" }}
                 />
               </div>
 
-              <div style={{ display: "flex", gap: "8px", marginTop: "4px" }}>
-                <button onClick={() => bringForward(selectedLayer.id)} style={{ flex: 1, background: "#f1f5f9", border: "1px solid rgba(112, 26, 52, 0.15)", borderRadius: "8px", padding: "6px", fontSize: "11px", fontWeight: 700, cursor: "pointer" }}>
-                  ⬆️ Bring Fwd
+              {/* Quick Layer Controls */}
+              <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: "6px", marginTop: "4px" }}>
+                <button
+                  onClick={() => bringForward(selectedLayer.id)}
+                  style={{ padding: "6px", borderRadius: "8px", border: "1px solid var(--line)", background: "var(--panel)", fontSize: "11px", cursor: "pointer" }}
+                >
+                  ⬆ Bring Forward
                 </button>
-                <button onClick={() => sendBack(selectedLayer.id)} style={{ flex: 1, background: "#f1f5f9", border: "1px solid rgba(112, 26, 52, 0.15)", borderRadius: "8px", padding: "6px", fontSize: "11px", fontWeight: 700, cursor: "pointer" }}>
-                  ⬇️ Send Back
+                <button
+                  onClick={() => sendBack(selectedLayer.id)}
+                  style={{ padding: "6px", borderRadius: "8px", border: "1px solid var(--line)", background: "var(--panel)", fontSize: "11px", cursor: "pointer" }}
+                >
+                  ⬇ Send Back
                 </button>
-              </div>
-
-              <div style={{ display: "flex", gap: "8px", marginTop: "4px" }}>
-                <button onClick={() => duplicateLayer(selectedLayer.id)} style={{ flex: 1, background: "#3b82f6", color: "#fff", border: "none", borderRadius: "10px", padding: "8px", fontSize: "11px", fontWeight: 700, cursor: "pointer" }}>
+                <button
+                  onClick={() => duplicateLayer(selectedLayer.id)}
+                  style={{ padding: "6px", borderRadius: "8px", border: "1px solid var(--line)", background: "var(--panel)", fontSize: "11px", cursor: "pointer" }}
+                >
                   📋 Duplicate
                 </button>
-                <button onClick={() => deleteLayer(selectedLayer.id)} style={{ flex: 1, background: "#ef4444", color: "#fff", border: "none", borderRadius: "10px", padding: "8px", fontSize: "11px", fontWeight: 700, cursor: "pointer" }}>
-                  🗑️ Delete
+                <button
+                  onClick={() => deleteLayer(selectedLayer.id)}
+                  style={{ padding: "6px", borderRadius: "8px", border: "1px solid var(--line)", background: "rgba(214, 83, 122, 0.1)", color: "var(--berry)", fontSize: "11px", cursor: "pointer" }}
+                >
+                  🗑 Delete
                 </button>
               </div>
             </div>
           ) : (
-            <div style={{ padding: "20px", fontSize: "12px", color: "rgba(74, 39, 51, 0.6)", textAlign: "center" }}>
-              Click any component on the canvas to inspect layer properties.
-            </div>
+            <div className="docket-empty">Select any component on the canvas to inspect its layer properties.</div>
           )}
 
-          <div style={{ borderTop: "1px solid rgba(112, 26, 52, 0.1)", padding: "16px" }}>
-            <div style={{ fontSize: "11px", fontWeight: 800, textTransform: "uppercase", color: "#701a34", marginBottom: "8px" }}>
+          {/* Layers Stack List */}
+          <div style={{ padding: "0 14px 10px", borderTop: "1px solid var(--line)", paddingTop: "12px" }}>
+            <div style={{ fontSize: "11px", fontWeight: 700, color: "var(--ink-dim)", marginBottom: "8px", textTransform: "uppercase", letterSpacing: "0.06em" }}>
               Layers Stack ({layers.length})
             </div>
-            <div style={{ display: "flex", flexDirection: "column", gap: "6px", maxHeight: "140px", overflowY: "auto" }}>
-              {layers
+            <div className="docket-list" style={{ maxHeight: "200px" }}>
+              {[...layers]
                 .sort((a, b) => b.zIndex - a.zIndex)
                 .map((l) => (
                   <div
                     key={l.id}
-                    onClick={() => setSelectedLayerId(l.id)}
+                    className="docket-item"
+                    onClick={() => selectLayer(l.id)}
                     style={{
-                      background: selectedLayerId === l.id ? "#fff7f9" : "#ffffff",
-                      border: selectedLayerId === l.id ? "1.5px solid #701a34" : "1px solid rgba(112, 26, 52, 0.15)",
-                      borderRadius: "8px",
-                      padding: "6px 10px",
-                      display: "flex",
-                      alignItems: "center",
-                      justifyContent: "space-between",
+                      borderColor: selectedLayerId === l.id ? "var(--berry)" : "var(--line)",
+                      background: selectedLayerId === l.id ? "#ffffff" : "var(--panel-alt)",
                       cursor: "pointer",
-                      fontSize: "11px",
                     }}
                   >
                     <div>
-                      <strong>{l.name}</strong> <span style={{ opacity: 0.6 }}>({l.type})</span>
+                      <div className="n">{l.name}</div>
+                      <div className="m">z: {l.zIndex}</div>
                     </div>
-                    <div style={{ fontFamily: "monospace", fontSize: "10px", color: "#701a34" }}>z: {l.zIndex}</div>
+                    <button onClick={(e) => { e.stopPropagation(); deleteLayer(l.id); }}>✕</button>
                   </div>
                 ))}
             </div>
           </div>
 
-          {/* INDIAN JEWELLERY PRICE BREAKDOWN CARD (₹ INR) */}
-          <div style={{ borderTop: "1px solid rgba(112, 26, 52, 0.15)", padding: "16px", background: "#fff7f9" }}>
-            <div style={{ fontSize: "11px", fontWeight: 800, textTransform: "uppercase", color: "#701a34", marginBottom: "10px", display: "flex", justifyContent: "space-between", alignItems: "center" }}>
-              <span>PRICE BREAKDOWN (₹ INR)</span>
-              <span style={{ fontSize: "9px", background: "#701a34", color: "#fff", padding: "2px 6px", borderRadius: "4px" }}>GST 3% INCL</span>
+          {/* Pricing Breakdown Footer */}
+          <div className="docket-footer" style={{ flexDirection: "column" }}>
+            <div style={{ display: "flex", justifyContent: "space-between", fontSize: "12px", fontWeight: 700, marginBottom: "8px" }}>
+              <span>Total Price:</span>
+              <span style={{ color: "var(--berry)" }}>{formatINR(indianPricing.grandTotal)}</span>
             </div>
-
-            <div style={{ display: "flex", flexDirection: "column", gap: "6px", fontSize: "11px", color: "#4a2733" }}>
-              <div style={{ display: "flex", justifyContent: "space-between" }}>
-                <span>Gold Weight</span>
-                <strong style={{ fontFamily: "monospace" }}>{indianPricing.goldWeightGrams} g</strong>
-              </div>
-
-              <div style={{ display: "flex", justifyContent: "space-between" }}>
-                <span>Gold Cost</span>
-                <strong style={{ fontFamily: "monospace" }}>{formatINR(indianPricing.goldCost)}</strong>
-              </div>
-
-              <div style={{ display: "flex", justifyContent: "space-between" }}>
-                <span>Diamond Cost</span>
-                <strong style={{ fontFamily: "monospace" }}>{formatINR(indianPricing.diamondCost)}</strong>
-              </div>
-
-              <div style={{ display: "flex", justifyContent: "space-between" }}>
-                <span>Making Charges (12%)</span>
-                <strong style={{ fontFamily: "monospace" }}>{formatINR(indianPricing.makingCharges)}</strong>
-              </div>
-
-              <div style={{ display: "flex", justifyContent: "space-between" }}>
-                <span>GST (3%)</span>
-                <strong style={{ fontFamily: "monospace" }}>{formatINR(indianPricing.gst)}</strong>
-              </div>
-
-              <div style={{ borderTop: "1.5px dashed rgba(112, 26, 52, 0.2)", paddingTop: "6px", marginTop: "4px", display: "flex", justifyContent: "space-between", fontSize: "13px", fontWeight: 800, color: "#701a34" }}>
-                <span>Total</span>
-                <span style={{ fontFamily: "serif", fontSize: "16px" }}>{formatINR(indianPricing.total)}</span>
-              </div>
-            </div>
+            <button className="primary" onClick={handleGenerateFinalJewellery}>
+              Generate Final Jewellery
+            </button>
           </div>
         </aside>
       </div>
 
-      {aiStatusMessage && (
-        <div
-          style={{
-            position: "fixed",
-            bottom: "20px",
-            left: "50%",
-            transform: "translateX(-50%)",
-            background: "rgba(26, 26, 26, 0.92)",
-            color: "#ffffff",
-            padding: "8px 20px",
-            borderRadius: "999px",
-            fontSize: "11px",
-            fontWeight: 600,
-            zIndex: 60,
-          }}
-        >
-          {aiStatusMessage}
-        </div>
-      )}
+      {/* ── MODALS ────────────────────────────────────────── */}
 
+      {/* 1. AI Auto Align Confirmation Modal */}
+      <AiAutoAlignModal
+        isOpen={isAiModalOpen}
+        recommendation={aiAlignRecommendation}
+        onClose={() => setIsAiModalOpen(false)}
+      />
+
+      {/* 2. Final Render Luxury Preview Modal */}
       {luxuryModalOpen && (
         <LuxuryPreviewModal
-          config={config}
+          config={{ band: "classic", stone: "round", setting: "prong", accents: {} }}
           metal={metal}
-          layers={layers}
+          layers={layers as any}
           indianPricing={indianPricing}
           onClose={() => setLuxuryModalOpen(false)}
         />
+      )}
+
+      {/* 3. Custom Component Upload Modal */}
+      {uploadModalOpen && (
+        <div className="inspector-modal-overlay" onClick={() => setUploadModalOpen(false)}>
+          <div className="inspector-modal-content" style={{ maxWidth: "480px" }} onClick={(e) => e.stopPropagation()}>
+            <button className="close-btn" onClick={() => setUploadModalOpen(false)}>✕</button>
+            <h2 style={{ fontSize: "20px" }}>Upload Custom Component</h2>
+            <p className="subtitle">Add a custom jewellery component asset to the studio library.</p>
+
+            <div style={{ display: "flex", flexDirection: "column", gap: "12px" }}>
+              <div>
+                <label style={{ fontSize: "11px", fontWeight: 600 }}>Component Name</label>
+                <input
+                  type="text"
+                  placeholder="e.g. Vintage Filigree Crown"
+                  value={uploadName}
+                  onChange={(e) => setUploadName(e.target.value)}
+                  style={{ width: "100%", padding: "8px", borderRadius: "8px", border: "1px solid var(--line)", fontSize: "12px", marginTop: "4px" }}
+                />
+              </div>
+
+              <div>
+                <label style={{ fontSize: "11px", fontWeight: 600 }}>Jewellery Category</label>
+                <select
+                  value={uploadCategory}
+                  onChange={(e) => setUploadCategory(e.target.value)}
+                  style={{ width: "100%", padding: "8px", borderRadius: "8px", border: "1px solid var(--line)", fontSize: "12px", marginTop: "4px" }}
+                >
+                  {CATEGORIES_BY_JEWELLERY_TYPE[selectedJewelleryType].map((c) => (
+                    <option key={c.key} value={c.key}>{c.label}</option>
+                  ))}
+                </select>
+              </div>
+
+              <div>
+                <label style={{ fontSize: "11px", fontWeight: 600 }}>Image URL / Asset Path</label>
+                <input
+                  type="text"
+                  placeholder="/images/custom_part.png or https://…"
+                  value={uploadImageUrl}
+                  onChange={(e) => setUploadImageUrl(e.target.value)}
+                  style={{ width: "100%", padding: "8px", borderRadius: "8px", border: "1px solid var(--line)", fontSize: "12px", marginTop: "4px" }}
+                />
+              </div>
+
+              <div>
+                <label style={{ fontSize: "11px", fontWeight: 600 }}>Specification Label</label>
+                <input
+                  type="text"
+                  placeholder="e.g. 18K Gold · 1.5g"
+                  value={uploadMetaLabel}
+                  onChange={(e) => setUploadMetaLabel(e.target.value)}
+                  style={{ width: "100%", padding: "8px", borderRadius: "8px", border: "1px solid var(--line)", fontSize: "12px", marginTop: "4px" }}
+                />
+              </div>
+
+              <div style={{ display: "flex", gap: "10px", justifyContent: "flex-end", marginTop: "12px" }}>
+                <button
+                  onClick={() => setUploadModalOpen(false)}
+                  style={{ padding: "8px 16px", borderRadius: "8px", border: "1px solid var(--line)", background: "var(--panel-alt)", fontSize: "12px", cursor: "pointer" }}
+                >
+                  Cancel
+                </button>
+                <button
+                  onClick={handleSaveCustomAsset}
+                  style={{ padding: "8px 18px", borderRadius: "8px", border: "none", background: "var(--berry)", color: "#fff", fontSize: "12px", fontWeight: 600, cursor: "pointer" }}
+                >
+                  Save Asset
+                </button>
+              </div>
+            </div>
+          </div>
+        </div>
       )}
     </div>
   );

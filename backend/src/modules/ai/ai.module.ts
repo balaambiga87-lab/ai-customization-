@@ -10,7 +10,10 @@ import { AiDesignerController } from './controllers/ai-designer.controller';
 import { AiReviewService } from './ai-review/ai-review.service';
 import { AiReviewController } from './ai-review/ai-review.controller';
 
+import { JewelleryAiModule } from './assistant/jewellery-ai.module';
+
 @Module({
+  imports: [JewelleryAiModule],
   controllers: [AiDesignerController, AiReviewController],
   providers: [
     TryOnService,
